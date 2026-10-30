@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Format
+        shell: bash
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+      - name: Requirement inventory
+        run: python3 scripts/generate-tracker.py --check
+      - name: Requirement inventory tests
+        run: python3 scripts/test_generate_tracker.py
+      - name: Vet
+        run: go vet ./...
+      - name: Unit and contract tests
+        run: go test -race ./...
+      - name: Conservative-planning end-to-end check
+        run: go test -tags=e2e ./tests/e2e/...
+      - name: Build binaries
+        run: |
+          go build -trimpath -o dist/ivp ./cmd/ivp
+          go build -trimpath -o dist/ivp-api ./cmd/ivp-api
+      - name: Verify CLI version
+        run: ./dist/ivp version
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: ivp
+          POSTGRES_USER: ivp
+          POSTGRES_PASSWORD: ivp-ci-only
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U ivp -d ivp"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Integration tests
+        env:
+          IVP_TEST_DATABASE_URL: postgres://ivp:ivp-ci-only@localhost:5432/ivp?sslmode=disable
+        run: go test -tags=integration ./internal/persistence
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - name: SBOM
+        run: go run github.com/anchore/syft/cmd/syft@v1.41.1 dir:. -o spdx-json=ivp.spdx.json
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: ivp-sbom
+          path: ivp.spdx.json
+

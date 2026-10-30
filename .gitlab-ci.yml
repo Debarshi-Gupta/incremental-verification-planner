@@ -1,0 +1,19 @@
+stages: [verify]
+
+variables:
+  GOTOOLCHAIN: local
+
+verify:
+  stage: verify
+  image: golang:1.27.3-alpine3.24@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4
+  script:
+    - test -z "$(gofmt -l $(find . -name '*.go' -not -path './.tooling/*'))"
+    - go vet ./...
+    - go test -race ./...
+    - go build -trimpath -o dist/ivp ./cmd/ivp
+    - ./dist/ivp verify --base "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --mode FAST_FEEDBACK --report dist/ivp-report.json
+  artifacts:
+    when: always
+    paths: [dist/ivp-report.json]
+    expire_in: 14 days
+

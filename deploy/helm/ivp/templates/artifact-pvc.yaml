@@ -1,0 +1,17 @@
+{{- if and (eq .Values.artifacts.backend "filesystem") .Values.artifacts.persistence.enabled (not .Values.artifacts.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ivp.fullname" . }}-artifacts
+  labels:
+    {{- include "ivp.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.artifacts.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.artifacts.persistence.size }}
+  {{- if .Values.artifacts.persistence.storageClassName }}
+  storageClassName: {{ .Values.artifacts.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}

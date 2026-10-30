@@ -1,0 +1,117 @@
+groups:
+  - name: ivp.rules
+    rules:
+      - alert: IVPAuditMiss
+        expr: sum by (adapter, severity) (increase(ivp_audit_misses_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IVP found an omitted failing test"
+          description: "An audit miss was recorded for adapter {{ $labels.adapter }} ({{ $labels.severity }}). Keep the affected scope on full verification until quarantine is resolved."
+
+      - alert: IVPAPI5xxRatioHigh
+        expr: |
+          sum(rate(ivp_api_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(ivp_api_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP API error ratio is above 5%"
+          description: "More than 5% of observed IVP API requests have returned 5xx responses for ten minutes."
+
+      - alert: IVPFullFallbackSurge
+        expr: sum(increase(ivp_full_fallback_total[30m])) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP full verification fallbacks increased"
+          description: "More than 20 full verification fallbacks occurred in the last 30 minutes. Inspect reason_code labels and input freshness."
+
+      - alert: IVPStaleEvidenceFallbacks
+        expr: |
+          sum(increase(ivp_full_fallback_total{reason_code=~"GRAPH_STALE|COVERAGE_STALE|COVERAGE_MISSING"}[30m])) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP is escalating because repository evidence is stale or missing"
+          description: "More than ten fallbacks in the last 30 minutes cite stale graph or coverage evidence. Refresh indexing and coverage data."
+
+      - alert: IVPAdapterErrorsHigh
+        expr: sum by (adapter, error_class) (rate(ivp_adapter_errors_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP adapter errors are recurring"
+          description: "Adapter {{ $labels.adapter }} is reporting more than six errors per minute in class {{ $labels.error_class }}."
+
+      - alert: IVPPlanP95LatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(ivp_plan_duration_seconds_bucket[10m]))) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP plan creation p95 exceeds two seconds"
+          description: "Plan generation is above the LLD's initial p95 target. Inspect graph size, database latency, and fallback reasons."
+
+      - alert: IVPAPIRequestP95LatencyHigh
+        expr: histogram_quantile(0.95, sum by (le, route) (rate(ivp_api_request_duration_seconds_bucket[10m]))) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP API request p95 exceeds two seconds"
+          description: "API route {{ $labels.route }} has p95 latency above two seconds for ten minutes."
+
+      - alert: IVPRetentionJobFailed
+        expr: max by (namespace, job_name) (kube_job_status_failed{job_name=~".*ivp.*retention.*"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP retention job failed"
+          description: "The IVP retention CronJob has a failed Job. Check its logs and database connectivity before retrying."
+
+      - alert: IVPMigrationJobFailed
+        expr: max by (namespace, job_name) (kube_job_status_failed{job_name=~".*ivp.*migrate.*"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IVP database migration failed"
+          description: "Readiness remains false until the migration failure is resolved and the deployment is safe to retry."
+
+      - alert: IVPArtifactStoreErrors
+        expr: sum(increase(ivp_artifact_store_errors_total[10m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP artifact storage is failing"
+          description: "Artifact uploads, retrieval, or retention are failing. Check object-store connectivity, permissions, and capacity."
+
+      - alert: IVPArtifactVolumeCapacityLow
+        expr: |
+          min by (namespace, persistentvolumeclaim) (
+            kubelet_volume_stats_available_bytes{persistentvolumeclaim=~".*ivp.*artifacts.*"}
+            / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~".*ivp.*artifacts.*"}
+          ) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IVP filesystem artifact volume is nearly full"
+          description: "Less than ten percent of the IVP artifact PVC remains. Increase capacity or shorten artifact retention."
+
+      - alert: IVPServiceUnavailable
+        expr: min by (job, instance) (up{job=~".*ivp.*"}) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IVP scrape target is unavailable"
+          description: "Prometheus cannot scrape an IVP target for at least two minutes."

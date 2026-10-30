@@ -1,0 +1,303 @@
+openapi: 3.1.0
+info:
+  title: Incremental Verification Planner API
+  version: 1.0.0
+  description: Tenant-scoped metadata, planning, execution result, audit and safety policy API. Repository source contents are never accepted.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+  - name: Identity
+  - name: Repositories
+  - name: Plans
+  - name: Executions
+  - name: Audits
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      security: []
+      responses:
+        '200': { description: Process is alive }
+  /health/ready:
+    get:
+      tags: [Health]
+      security: []
+      responses:
+        '200': { description: Dependencies are ready }
+        '503': { $ref: '#/components/responses/Error' }
+  /me:
+    get:
+      tags: [Identity]
+      responses:
+        '200': { description: Authenticated tenant membership, content: { application/json: { schema: { $ref: '#/components/schemas/Principal' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+  /repositories:
+    get:
+      tags: [Repositories]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Authorized repository page }
+    post:
+      tags: [Repositories]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RepositoryRequest' } } } }
+      responses:
+        '201': { description: Registered repository }
+        '409': { $ref: '#/components/responses/Error' }
+  /repositories/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    get:
+      tags: [Repositories]
+      responses:
+        '200': { description: Repository metadata }
+        '404': { $ref: '#/components/responses/Error' }
+  /repositories/{id}/snapshots:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Repositories]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SnapshotRequest' } } } }
+      responses:
+        '201': { description: Immutable metadata-only snapshot }
+        '400': { $ref: '#/components/responses/Error' }
+  /repositories/{id}/policy:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    get:
+      tags: [Repositories]
+      responses:
+        '200': { description: Effective versioned policy }
+    put:
+      tags: [Repositories]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PolicyRequest' } } } }
+      responses:
+        '200': { description: Stored policy version }
+        '422': { $ref: '#/components/responses/Error' }
+  /repositories/{id}/plans:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Plans]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PlanRequest' } } } }
+      responses:
+        '201': { description: Deterministic explainable plan }
+        '409': { $ref: '#/components/responses/Error' }
+  /plans/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    get:
+      tags: [Plans]
+      responses:
+        '200': { description: Plan with selected and omitted rationales }
+        '404': { $ref: '#/components/responses/Error' }
+  /plans/{id}/executions:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Executions]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ExecutionStartRequest' } } } }
+      responses:
+        '201': { description: Registered execution }
+        '409': { $ref: '#/components/responses/Error' }
+  /executions/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    get:
+      tags: [Executions]
+      responses:
+        '200': { description: Execution state and outcome }
+        '404': { $ref: '#/components/responses/Error' }
+  /executions/{id}/results:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Executions]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ResultSubmission' } } } }
+      responses:
+        '200': { description: Append-only accepted result }
+        '409': { $ref: '#/components/responses/Error' }
+  /executions/{id}/artifacts:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Executions]
+      description: Upload a bounded JSON or XML test report. IVP sanitizes the report before storing it and scopes the resulting object to the execution tenant; arbitrary logs are not accepted.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: string, format: binary } }
+          application/xml: { schema: { type: string, format: binary } }
+          text/xml: { schema: { type: string, format: binary } }
+      responses:
+        '201': { description: Sanitized report metadata and opaque artifact id }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+  /artifacts/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    get:
+      tags: [Executions]
+      description: Retrieve an unexpired artifact only within the authenticated tenant.
+      responses:
+        '200': { description: Sanitized report bytes with integrity ETag }
+        '404': { $ref: '#/components/responses/Error' }
+  /executions/{id}/audits:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Audits]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AuditRequest' } } } }
+      responses:
+        '201': { description: Comparable audit result; a miss quarantines the scope atomically }
+  /repositories/{id}/metrics:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    get:
+      tags: [Audits]
+      parameters: [{ $ref: '#/components/parameters/Limit' }, { name: cursor, in: query, schema: { type: string } }]
+      responses:
+        '200': { description: Calibration, audit safety and execution metrics with sample counts }
+  /repositories/{id}/quarantine:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Audits]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/QuarantineRequest' } } } }
+      responses:
+        '201': { description: Scope quarantined }
+  /repositories/{id}/quarantine/{scope}/acknowledge:
+    parameters:
+      - { $ref: '#/components/parameters/UUID' }
+      - { name: scope, in: path, required: true, schema: { type: string, maxLength: 200 } }
+    post:
+      tags: [Audits]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AcknowledgeRequest' } } } }
+      responses:
+        '200': { description: Remediation acknowledged; clearing still requires a later clean comparable audit }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    UUID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 200 }
+  responses:
+    Error:
+      description: Sanitized stable error response
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  schemas:
+    Principal:
+      type: object
+      required: [subject, tenant_id, user_id, role]
+      properties:
+        subject: { type: string }
+        tenant_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        role: { type: string, enum: [reader, executor, maintainer, auditor, admin] }
+    RepositoryRequest:
+      type: object
+      additionalProperties: false
+      required: [slug, canonical_url]
+      properties:
+        slug: { type: string, minLength: 1, maxLength: 200 }
+        canonical_url: { type: string, format: uri }
+        default_branch: { type: string, default: main }
+    SnapshotRequest:
+      type: object
+      additionalProperties: false
+      required: [snapshot, nodes, edges, test_units, coverage]
+      properties:
+        snapshot: { type: object, description: Metadata-only immutable snapshot and digests }
+        nodes: { type: array, maxItems: 500000, items: { type: object } }
+        edges: { type: array, maxItems: 2000000, items: { type: object } }
+        test_units: { type: array, maxItems: 200000, items: { type: object } }
+        coverage: { type: array, maxItems: 2000000, items: { type: object } }
+    PlanRequest:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, base_sha, head_sha, worktree_hash, mode]
+      properties:
+        request_id: { type: string, format: uuid }
+        snapshot_id: { type: string, format: uuid }
+        base_sha: { type: string, pattern: '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' }
+        head_sha: { type: string, pattern: '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' }
+        worktree_hash: { type: string, minLength: 1 }
+        mode: { type: string, enum: [FULL, OBSERVE, FAST_FEEDBACK, RISK_BASED_CI] }
+        changed_files: { type: array, items: { type: object, description: Normalized metadata, hashes and diff hunks only } }
+        client_capabilities: { type: object }
+        execution_context: { type: object }
+    PolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [policy, policy_hash]
+      properties:
+        policy: { type: object }
+        policy_hash: { type: string, minLength: 1 }
+    ExecutionStartRequest:
+      type: object
+      additionalProperties: false
+      required: [environment_digest]
+      properties:
+        worktree_hash: { type: string }
+        environment_digest: { type: string, minLength: 1 }
+    ResultSubmission:
+      type: object
+      additionalProperties: false
+      required: [outcome]
+      properties:
+        outcome: { type: string, enum: [TARGETED_PASS, TARGETED_FAIL, FULL_VERIFICATION_PASS, FULL_VERIFICATION_FAIL, INFRA_FAILURE, STALE] }
+        exit_code: { type: [integer, 'null'] }
+        completed_at: { type: string, format: date-time }
+        elapsed_ms: { type: integer, minimum: 0 }
+        compute_ms: { type: integer, minimum: 0 }
+        summary: { type: object }
+        unit_results: { type: array, items: { type: object } }
+    AuditRequest:
+      type: object
+      additionalProperties: false
+      required: [adapter, selected_outcome, full_outcome, selected_fingerprint, full_fingerprint]
+      properties:
+        adapter: { type: string }
+        rule_scope: { type: string }
+        selected_outcome: { type: string }
+        full_outcome: { type: string }
+        selected_keys: { type: array, items: { type: string } }
+        failures: { type: array, items: { type: object } }
+        selected_fingerprint: { type: object }
+        full_fingerprint: { type: object }
+        failure_output_hash: { type: string }
+    QuarantineRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_key, reason_code]
+      properties:
+        scope_key: { type: string, maxLength: 200 }
+        reason_code: { type: string }
+        expires_at: { type: [string, 'null'], format: date-time }
+    AcknowledgeRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    ErrorResponse:
+      type: object
+      required: [error, request_id]
+      properties:
+        request_id: { type: string }
+        trace_id: { type: string }
+        error:
+          type: object
+          required: [code, message, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            retryable: { type: boolean }
+            details: {}

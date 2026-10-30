@@ -1,0 +1,70 @@
+replicaCount: 1
+image:
+  repository: ghcr.io/ivp/ivp-api
+  digest: ""
+  pullPolicy: IfNotPresent
+serviceAccount:
+  create: true
+  name: ""
+service:
+  type: ClusterIP
+  port: 8080
+database:
+  existingSecret: ivp-database
+  secretKey: url
+oidc:
+  existingSecret: ivp-oidc
+  issuerKey: issuer
+  audienceKey: audience
+  clientIDKey: client-id
+artifacts:
+  backend: filesystem
+  directory: /var/lib/ivp/artifacts
+  persistence:
+    enabled: true
+    existingClaim: ""
+    accessModes: [ReadWriteOnce]
+    size: 5Gi
+    storageClassName: ""
+  existingSecret: ""
+  endpoint: ""
+  region: us-east-1
+  bucket: ""
+  accessKeyKey: access-key
+  secretKeyKey: secret-key
+  sessionTokenKey: session-token
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1
+    memory: 512Mi
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+networkPolicy:
+  enabled: true
+  databaseNamespace: database
+  databasePodSelector:
+    app.kubernetes.io/name: postgresql
+  ingressNamespaceSelector: {}
+  metricsNamespaceSelector: {}
+  additionalEgress: []
+migrations:
+  enabled: true
+  backoffLimit: 3
+retention:
+  enabled: true
+  schedule: "17 3 * * *"
+  rawHistoryDays: 90
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+ingress:
+  enabled: false
+  className: ""
+  host: ivp.example.invalid
+  tlsSecretName: ivp-tls
+

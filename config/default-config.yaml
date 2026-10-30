@@ -1,0 +1,131 @@
+version: 1
+repository:
+  slug: team/sample-service
+  default_branch: main
+
+analysis:
+  base_ref: origin/main
+  follow_renames: true
+  include_untracked: true
+  max_changed_files_for_selective_plan: 500
+  graph_staleness_minutes: 1440
+  coverage_staleness_days: 30
+  require_clean_dependency_resolution: true
+
+server:
+  endpoint: https://ivp.internal.example
+  connect_timeout_seconds: 3
+  request_timeout_seconds: 10
+  offline_policy: FULL_SUITE_FALLBACK
+
+execution:
+  full_suite_argv: []
+  timeout_seconds: 3600
+  max_output_bytes: 1048576
+
+modes:
+  default: FAST_FEEDBACK
+  observe:
+    execute_full_suite: true
+    selected_plan_only_report: true
+  fast_feedback:
+    final_ci_full_suite_required: true
+    allow_selective_inner_loop: true
+  risk_based_ci:
+    enabled_by_organization_policy: false
+    audit_sample_rate: 0.10
+    minimum_calibration_runs: 500
+    minimum_audit_runs: 100
+
+selection:
+  low_risk_max_score: 24
+  medium_risk_max_score: 59
+  low_risk_min_weighted_coverage: 0.95
+  medium_risk_min_weighted_coverage: 0.99
+  minimum_selection_confidence: 0.98
+  max_selective_estimated_runtime_fraction: 0.70
+  unknown_evidence_action: FULL_SUITE
+  non_deterministic_test_action: INCLUDE_AND_LABEL
+  if_no_tests_selected: FULL_SUITE
+
+safety:
+  hard_full_suite_paths:
+    - "**/pom.xml"
+    - "**/build.gradle"
+    - "**/build.gradle.kts"
+    - "**/settings.gradle"
+    - "**/settings.gradle.kts"
+    - "**/gradle/libs.versions.toml"
+    - "**/gradle-wrapper.properties"
+    - "**/mvnw"
+    - "**/gradlew"
+    - "**/MODULE.bazel"
+    - "**/WORKSPACE*"
+    - "**/BUILD"
+    - "**/BUILD.bazel"
+    - "**/nx.json"
+    - "**/project.json"
+    - "**/pytest.ini"
+    - "**/pyproject.toml"
+    - "**/jest.config.*"
+    - "**/*lock*"
+    - "**/migrations/**"
+    - "**/db/migrate/**"
+  hard_full_suite_risk_labels:
+    - SECURITY_CRITICAL
+    - AUTHENTICATION
+    - AUTHORIZATION
+    - CRYPTOGRAPHY
+    - PAYMENT
+    - DATA_MIGRATION
+    - PUBLIC_CONTRACT
+  always_run_check_ids:
+    - format-check
+    - lint
+    - typecheck
+    - secret-scan
+    - dependency-audit
+  audit:
+    enabled: true
+    default_mode: SHADOW
+    sample_rate: 0.10
+    minimum_audits_before_selective_ci: 100
+    quarantine_on_confirmed_miss: true
+    quarantine_hours: 168
+    repeat_failed_test_count: 2
+
+adapters:
+  gradle:
+    enabled: true
+    wrapper_required: true
+    unit_test_tasks: [test]
+    integration_test_tasks: [integrationTest]
+  maven:
+    enabled: true
+    wrapper_preferred: true
+    surefire_enabled: true
+    failsafe_enabled: true
+  bazel:
+    enabled: true
+    use_configured_target_patterns: true
+  nx:
+    enabled: true
+    test_target_names: [test, e2e]
+  pytest:
+    enabled: true
+    config_file: pyproject.toml
+  jest:
+    enabled: true
+    config_discovery: true
+  generic:
+    enabled: true
+    test_units: []
+    checks: []
+
+telemetry:
+  enabled: true
+  capture_raw_stdout: false
+  capture_failure_excerpt: true
+  max_excerpt_bytes: 8192
+  retention_days: 90
+

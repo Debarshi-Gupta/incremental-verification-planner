@@ -1,0 +1,153 @@
+{{- if not (has .Values.artifacts.backend (list "filesystem" "s3")) }}
+{{- fail "artifacts.backend must be filesystem or s3" }}
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) (ne .Values.artifacts.backend "s3") }}
+{{- fail "replicaCount greater than one requires the shared S3-compatible artifact backend" }}
+{{- end }}
+{{- if and (eq .Values.artifacts.backend "s3") (not .Values.artifacts.existingSecret) }}
+{{- fail "artifacts.existingSecret is required for the S3-compatible backend" }}
+{{- end }}
+{{- if and (eq .Values.artifacts.backend "s3") (or (not .Values.artifacts.endpoint) (not .Values.artifacts.region) (not .Values.artifacts.bucket)) }}
+{{- fail "artifacts.endpoint, artifacts.region, and artifacts.bucket are required for the S3-compatible backend" }}
+{{- end }}
+{{- if and .Values.networkPolicy.enabled (eq .Values.artifacts.backend "s3") (not .Values.networkPolicy.additionalEgress) }}
+{{- fail "networkPolicy.additionalEgress must allow the configured S3-compatible endpoint" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ivp.fullname" . }}
+  labels:
+    {{- include "ivp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "ivp.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "ivp.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ default (include "ivp.fullname" .) .Values.serviceAccount.name }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ include "ivp.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: IVP_ENV
+              value: production
+            - name: IVP_LISTEN_ADDR
+              value: ":8080"
+            - name: IVP_ARTIFACT_BACKEND
+              value: {{ .Values.artifacts.backend | quote }}
+            - name: IVP_ARTIFACT_DIR
+              value: {{ .Values.artifacts.directory | quote }}
+            {{- if eq .Values.artifacts.backend "s3" }}
+            - name: IVP_S3_ENDPOINT
+              value: {{ .Values.artifacts.endpoint | quote }}
+            - name: IVP_S3_REGION
+              value: {{ .Values.artifacts.region | quote }}
+            - name: IVP_S3_BUCKET
+              value: {{ .Values.artifacts.bucket | quote }}
+            - name: IVP_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.existingSecret }}
+                  key: {{ .Values.artifacts.accessKeyKey }}
+            - name: IVP_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.existingSecret }}
+                  key: {{ .Values.artifacts.secretKeyKey }}
+            - name: IVP_S3_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.existingSecret }}
+                  key: {{ .Values.artifacts.sessionTokenKey }}
+                  optional: true
+            {{- end }}
+            - name: IVP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.secretKey }}
+            - name: IVP_OIDC_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: {{ .Values.oidc.issuerKey }}
+            - name: IVP_OIDC_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: {{ .Values.oidc.audienceKey }}
+            - name: IVP_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: {{ .Values.oidc.clientIDKey }}
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq .Values.artifacts.backend "filesystem" }}
+            - name: artifacts
+              mountPath: {{ .Values.artifacts.directory }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+        {{- if eq .Values.artifacts.backend "filesystem" }}
+        - name: artifacts
+          {{- if .Values.artifacts.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.artifacts.persistence.existingClaim }}
+          {{- else if .Values.artifacts.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "ivp.fullname" . }}-artifacts
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.artifacts.persistence.size }}
+          {{- end }}
+        {{- end }}
+
