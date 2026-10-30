@@ -58,7 +58,7 @@ func (s Service) Process(ctx context.Context, in Input) (Result, error) {
 
 type QuarantineStore interface {
 	AcknowledgeQuarantine(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) error
-	ClearEligibleQuarantine(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
+	ClearEligibleQuarantine(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, time.Time) error
 }
 
 func Acknowledge(ctx context.Context, store QuarantineStore, tenantID, actorID, repositoryID uuid.UUID, scope, reason string) error {
@@ -71,11 +71,14 @@ func Acknowledge(ctx context.Context, store QuarantineStore, tenantID, actorID, 
 	return store.AcknowledgeQuarantine(ctx, tenantID, actorID, repositoryID, scope, reason)
 }
 
-func ClearAfterCleanAudit(ctx context.Context, store QuarantineStore, tenantID, repositoryID uuid.UUID, scope string, now time.Time) error {
+func ClearAfterCleanAudit(ctx context.Context, store QuarantineStore, tenantID, actorID, repositoryID uuid.UUID, scope, reason string, now time.Time) error {
 	if store == nil {
 		return errors.New("quarantine store is required")
 	}
-	return store.ClearEligibleQuarantine(ctx, tenantID, repositoryID, scope, now)
+	if scope == "" || reason == "" {
+		return errors.New("scope and clearing reason are required")
+	}
+	return store.ClearEligibleQuarantine(ctx, tenantID, actorID, repositoryID, scope, reason, now)
 }
 
 var _ = domain.AuditRecord{}

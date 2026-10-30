@@ -291,6 +291,11 @@ func (r *Runner) Run(ctx context.Context, command adapters.ExecutionCommand) Res
 // canonical outcome. Missing, malformed, or zero-test reports stay infra
 // failures, and a targeted pass is always distinct from a full verification.
 func (r *Runner) RunAndParse(ctx context.Context, adapter adapters.Adapter, command adapters.ExecutionCommand, req adapters.ParseRequest) Result {
+	reportPatterns := append([]string(nil), req.ReportPaths...)
+	if len(reportPatterns) == 0 {
+		reportPatterns = append(reportPatterns, command.ReportPaths...)
+	}
+	reportsBefore := FingerprintReports(r.root, reportPatterns)
 	result := r.Run(ctx, command)
 	if result.Status != StatusCompleted {
 		return result
@@ -328,8 +333,15 @@ func (r *Runner) RunAndParse(ctx context.Context, adapter adapters.Adapter, comm
 	req.Stdout = []byte(result.StdoutExcerpt)
 	req.Stderr = []byte(result.StderrExcerpt)
 	req.ExitCode = *result.ExitCode
-	if len(req.ReportPaths) == 0 {
-		req.ReportPaths = command.ReportPaths
+	if len(reportPatterns) > 0 {
+		req.ReportPaths = FreshReports(r.root, reportPatterns, reportsBefore)
+		if len(req.ReportPaths) == 0 {
+			result.Status = StatusInfraError
+			result.Outcome = domain.OutcomeInfraFailure
+			result.ErrorClass = "REPORT_STALE"
+			result.Error = "the command produced no fresh result report"
+			return result
+		}
 	}
 	if req.MaxReportBytes <= 0 {
 		req.MaxReportBytes = adapters.DefaultReportLimit
@@ -376,6 +388,85 @@ func (r *Runner) RunAndParse(ctx context.Context, adapter adapters.Adapter, comm
 		}
 	}
 	return result
+}
+
+// ReportFingerprint captures the identity and modification state of a
+// repository-local report before a command starts. Comparing both content and
+// modification time recognizes freshly rewritten but byte-identical reports
+// while rejecting stale reports left by a prior run.
+type ReportFingerprint struct {
+	Hash         string
+	Size         int64
+	ModifiedNanos int64
+}
+
+func FingerprintReports(root string, patterns []string) map[string]ReportFingerprint {
+	result := make(map[string]ReportFingerprint)
+	for _, file := range expandReportPaths(root, patterns) {
+		info, err := os.Lstat(file)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > adapters.DefaultReportLimit {
+			continue
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		digest := sha256.Sum256(data)
+		result[filepath.Clean(file)] = ReportFingerprint{Hash: hex.EncodeToString(digest[:]), Size: info.Size(), ModifiedNanos: info.ModTime().UnixNano()}
+	}
+	return result
+}
+
+// FreshReports returns only concrete, safe report paths that were created or
+// changed by the latest command. Parsers never consume stale files matching a
+// configured glob.
+func FreshReports(root string, patterns []string, before map[string]ReportFingerprint) []string {
+	current := FingerprintReports(root, patterns)
+	paths := make([]string, 0, len(current))
+	for file, fingerprint := range current {
+		previous, existed := before[filepath.Clean(file)]
+		if existed && previous == fingerprint {
+			continue
+		}
+		rel, err := filepath.Rel(root, file)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func expandReportPaths(root string, patterns []string) []string {
+	seen := make(map[string]bool)
+	var files []string
+	for _, pattern := range patterns {
+		resolved, err := adapters.ResolveWithin(root, pattern)
+		if err != nil {
+			continue
+		}
+		matches := []string{resolved}
+		if strings.ContainsAny(resolved, "*?[") {
+			matches, err = filepath.Glob(resolved)
+			if err != nil {
+				continue
+			}
+		}
+		for _, match := range matches {
+			rel, err := filepath.Rel(root, match)
+			if err != nil {
+				continue
+			}
+			file, err := adapters.ResolveWithin(root, rel)
+			if err != nil || seen[filepath.Clean(file)] {
+				continue
+			}
+			seen[filepath.Clean(file)] = true
+			files = append(files, filepath.Clean(file))
+		}
+	}
+	return files
 }
 
 func (r *Runner) validate(c adapters.ExecutionCommand) error {

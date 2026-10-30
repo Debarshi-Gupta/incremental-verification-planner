@@ -1,0 +1,24 @@
+version: 1
+repository:
+  slug: Debarshi-Gupta/incremental-verification-planner
+  default_branch: main
+
+execution:
+  full_suite_argv: ["go", "test", "-race", "./..."]
+  timeout_seconds: 3600
+  max_output_bytes: 1048576
+  failure_retry_count: 1
+
+modes:
+  default: FAST_FEEDBACK
+  observe:
+    execute_full_suite: true
+    selected_plan_only_report: true
+  fast_feedback:
+    final_ci_full_suite_required: true
+    allow_selective_inner_loop: true
+  risk_based_ci:
+    enabled_by_organization_policy: false
+    audit_sample_rate: 0.1
+    minimum_calibration_runs: 500
+    minimum_audit_runs: 100

@@ -1,0 +1,118 @@
+name: Signed container release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build IVP CLI
+        run: |
+          mkdir -p dist
+          go build -trimpath -o dist/ivp ./cmd/ivp
+      - name: Run authoritative release verification
+        id: verify
+        env:
+          IVP_SERVER_ENDPOINT: ${{ vars.IVP_SERVER_ENDPOINT }}
+          IVP_TENANT_ID: ${{ vars.IVP_TENANT_ID }}
+          IVP_OIDC_AUDIENCE: ${{ vars.IVP_OIDC_AUDIENCE }}
+          IVP_POLICY_VERIFY_PUBLIC_KEY: ${{ secrets.IVP_POLICY_VERIFY_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          base="$(git rev-parse HEAD^)"
+          ./dist/ivp verify --base "$base" --mode FAST_FEEDBACK --report dist/ivp-release-verification.json
+      - name: Run unsampled isolated release audit
+        if: ${{ always() && steps.verify.outcome != 'skipped' }}
+        env:
+          IVP_SERVER_ENDPOINT: ${{ vars.IVP_SERVER_ENDPOINT }}
+          IVP_TENANT_ID: ${{ vars.IVP_TENANT_ID }}
+          IVP_OIDC_AUDIENCE: ${{ vars.IVP_OIDC_AUDIENCE }}
+          IVP_POLICY_VERIFY_PUBLIC_KEY: ${{ secrets.IVP_POLICY_VERIFY_PUBLIC_KEY }}
+          IVP_REQUIRED_SERVICES_DIGEST: ${{ secrets.IVP_REQUIRED_SERVICES_DIGEST }}
+        run: ./dist/ivp audit --run latest --rule-scope all
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        if: always()
+        with:
+          name: ivp-release-verification-report
+          path: dist/ivp-release-verification.json
+          if-no-files-found: ignore
+  image:
+    needs: verify-and-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build API image
+        id: build
+        env:
+          IMAGE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/$repository/ivp-api"
+          docker build --build-arg APP=ivp-api --build-arg VERSION="$IMAGE_TAG" --build-arg COMMIT="$GITHUB_SHA" \
+            --tag "$image:$IMAGE_TAG" .
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Scan API image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish image and capture digest
+        id: publish
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          TAG: ${{ steps.build.outputs.tag }}
+        shell: bash
+        run: |
+          docker push "$IMAGE:$TAG"
+          digest="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE:$TAG" | awk -F@ 'NR == 1 { print $2 }')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Registry did not return a valid immutable image digest." >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.0.6
+      - name: Sign and verify published image
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        shell: bash
+        run: |
+          reference="$IMAGE@$DIGEST"
+          cosign sign --yes "$reference"
+          cosign verify "$reference" \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          echo "Published and verified `$reference`" >> "$GITHUB_STEP_SUMMARY"

@@ -148,7 +148,7 @@ func routeTemplate(path string) string {
 		"/identity.me": {}, "/repositories.create": {}, "/repositories.list": {}, "/repositories.get": {},
 		"/snapshots.create": {}, "/policy.get": {}, "/policy.update": {}, "/plans.create": {},
 		"/plans.get": {}, "/executions.start": {}, "/executions.result": {}, "/executions.get": {},
-		"/audits.submit": {}, "/metrics.repository": {}, "/quarantine.create": {}, "/quarantine.acknowledge": {},
+		"/audits.submit": {}, "/metrics.repository": {}, "/quarantine.create": {}, "/quarantine.acknowledge": {}, "/quarantine.clear": {},
 		"/artifacts.upload": {}, "/artifacts.get": {},
 	}
 	if _, ok := allowed[canonical]; !ok {

@@ -67,10 +67,13 @@ func enforceOrganizationConstraints(cfg *Config, baseline Config, org Organizati
 	if cfg.Server.OfflinePolicy != baseline.Server.OfflinePolicy {
 		return invalid("repository config cannot change offline trust behavior")
 	}
+	if cfg.Execution.FailureRetryCount < baseline.Execution.FailureRetryCount {
+		return invalid("repository config cannot weaken the organization failure retry policy")
+	}
 	if baseline.Analysis.RequireCleanDependencyResolution && !cfg.Analysis.RequireCleanDependencyResolution {
 		return invalid("repository config cannot disable clean dependency resolution")
 	}
-	if cfg.Analysis.MaxChangedFilesForSelectivePlan > baseline.Analysis.MaxChangedFilesForSelectivePlan || cfg.Analysis.GraphStalenessMinutes > baseline.Analysis.GraphStalenessMinutes || cfg.Analysis.CoverageStalenessDays > baseline.Analysis.CoverageStalenessDays {
+	if cfg.Analysis.MaxChangedFilesForSelectivePlan > baseline.Analysis.MaxChangedFilesForSelectivePlan || cfg.Analysis.GraphStalenessMinutes > baseline.Analysis.GraphStalenessMinutes || cfg.Analysis.CoverageStalenessDays > baseline.Analysis.CoverageStalenessDays || cfg.Analysis.HistoryWindowDays > baseline.Analysis.HistoryWindowDays {
 		return invalid("repository config cannot weaken changed-file or evidence-staleness limits")
 	}
 	if cfg.Selection.LowRiskMaxScore > baseline.Selection.LowRiskMaxScore || cfg.Selection.MediumRiskMaxScore > baseline.Selection.MediumRiskMaxScore ||
@@ -152,6 +155,7 @@ func ToDomainPolicy(c Config, version int64, org *OrganizationPolicy) domain.Pol
 		MaxChangedFilesForSelectivePlan:  c.Analysis.MaxChangedFilesForSelectivePlan,
 		GraphStaleness:                   time.Duration(c.Analysis.GraphStalenessMinutes) * time.Minute,
 		CoverageStaleness:                time.Duration(c.Analysis.CoverageStalenessDays) * 24 * time.Hour,
+		HistoryWindow:                    time.Duration(c.Analysis.HistoryWindowDays) * 24 * time.Hour,
 		DependencyFanoutEscalation:       250,
 		DependencyCap:                    100,
 		MinimumCostFloorMillis:           1000,

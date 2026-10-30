@@ -10,6 +10,9 @@ permissions:
 
 jobs:
   go:
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -17,6 +20,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
         with:
           go-version-file: go.mod
@@ -34,12 +39,34 @@ jobs:
         run: go test -race ./...
       - name: Conservative-planning end-to-end check
         run: go test -tags=e2e ./tests/e2e/...
+      - name: Prepare binary output directory
+        run: mkdir -p dist
       - name: Build binaries
         run: |
           go build -trimpath -o dist/ivp ./cmd/ivp
           go build -trimpath -o dist/ivp-api ./cmd/ivp-api
       - name: Verify CLI version
         run: ./dist/ivp version
+      - name: IVP authoritative verification
+        env:
+          IVP_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+          IVP_SERVER_ENDPOINT: ${{ vars.IVP_SERVER_ENDPOINT }}
+          IVP_TENANT_ID: ${{ vars.IVP_TENANT_ID }}
+          IVP_OIDC_AUDIENCE: ${{ vars.IVP_OIDC_AUDIENCE }}
+          IVP_POLICY_VERIFY_PUBLIC_KEY: ${{ secrets.IVP_POLICY_VERIFY_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          base="$IVP_BASE_REF"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          ./dist/ivp verify --base "$base" --mode FAST_FEEDBACK --report dist/ivp-report.json
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        if: always()
+        with:
+          name: ivp-report-${{ matrix.os }}
+          path: dist/ivp-report.json
+          if-no-files-found: ignore
 
   integration:
     runs-on: ubuntu-latest

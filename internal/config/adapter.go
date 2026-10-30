@@ -15,6 +15,24 @@ func (c Config) ToAdapterConfig(adapterID string, allowedExecutables []string) a
 		MaxOutputBytes:     int64(c.Execution.MaxOutputBytes),
 		AllowedExecutables: append([]string(nil), allowedExecutables...),
 	}
+	switch adapterID {
+	case "gradle":
+		result.CoveragePaths = append([]string(nil), c.Adapters.Gradle.CoveragePaths...)
+	case "maven":
+		result.CoveragePaths = append([]string(nil), c.Adapters.Maven.CoveragePaths...)
+	case "bazel":
+		result.CoveragePaths = append([]string(nil), c.Adapters.Bazel.CoveragePaths...)
+	case "nx":
+		result.CoveragePaths = append([]string(nil), c.Adapters.Nx.CoveragePaths...)
+	case "pytest":
+		result.CoveragePaths = append([]string(nil), c.Adapters.Pytest.CoveragePaths...)
+	case "jest":
+		result.CoveragePaths = append([]string(nil), c.Adapters.Jest.CoveragePaths...)
+	case "generic":
+		// Each generic unit owns its own report and coverage configuration.
+	default:
+		return result
+	}
 	if adapterID != "generic" {
 		return result
 	}
@@ -52,6 +70,7 @@ func toTargetSpec(u GenericUnitConfig, fallbackKind string) adapters.TargetSpec 
 	return adapters.TargetSpec{
 		ID: u.ID, Kind: fallbackKind, DisplayName: u.DisplayName, Argv: append([]string(nil), u.Argv...), CWD: u.CWD,
 		MapsPaths: append([]string(nil), u.MapsPaths...), DependsOn: append([]string(nil), u.DependsOn...),
+		ReportPaths: append([]string(nil), u.ReportPaths...), CoveragePaths: append([]string(nil), u.CoveragePaths...),
 		RiskLabels: append([]string(nil), u.RiskLabels...), Mandatory: u.Mandatory,
 		Timeout:       time.Duration(u.TimeoutSeconds) * time.Second,
 		ResourceGroup: u.ResourceGroup,

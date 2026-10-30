@@ -141,7 +141,7 @@ func (d *DB) StartExecution(ctx context.Context, tenantID, executorID uuid.UUID,
 		if expectedWorktree != worktreeHash || !expires.After(now) {
 			return errors.New("plan is stale or has expired")
 		}
-		if status != domain.PlanReady && !(status == domain.PlanFullRequired && fullSuite) && !(status == domain.PlanPassed && fullSuite) {
+		if status != domain.PlanReady && !(fullSuite && (status == domain.PlanFullRequired || status == domain.PlanPassed || status == domain.PlanFailed || status == domain.PlanError)) {
 			return errors.New("plan is not executable under the requested verification mode")
 		}
 		if mode == domain.ModeFull && !fullSuite {
@@ -175,6 +175,7 @@ type ResultSubmission struct {
 	ComputeMillis int64                   `json:"compute_ms"`
 	Summary       json.RawMessage         `json:"summary,omitempty"`
 	UnitResults   []UnitResult            `json:"unit_results,omitempty"`
+	Coverage      []domain.CoverageObservation `json:"coverage,omitempty"`
 }
 
 func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uuid.UUID, result ResultSubmission) error {
@@ -186,6 +187,9 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 	}
 	if len(result.UnitResults) > 100_000 {
 		return errors.New("too many unit results")
+	}
+	if len(result.Coverage) > 100_000 {
+		return errors.New("too many coverage observations")
 	}
 	return d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		var planID uuid.UUID
@@ -201,8 +205,9 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 			return err
 		}
 		var executionSummary []byte
-		var executionState string
-		if err := tx.QueryRow(ctx, `SELECT summary_json,status FROM executions WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, executionID).Scan(&executionSummary, &executionState); err != nil {
+		var executionState, executionEnvironment string
+		var executionStartedAt time.Time
+		if err := tx.QueryRow(ctx, `SELECT summary_json,status,environment_digest,started_at FROM executions WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, executionID).Scan(&executionSummary, &executionState, &executionEnvironment, &executionStartedAt); err != nil {
 			return err
 		}
 		if executionState != "RUNNING" {
@@ -227,13 +232,59 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 				allowed[unit.StableKey] = struct{}{}
 			}
 		}
+		unitIDs := make(map[string]uuid.UUID, len(allowed))
+		if len(result.Coverage) > 0 && len(allowed) > 0 {
+			allowedKeys := make([]string, 0, len(allowed))
+			for key := range allowed {
+				allowedKeys = append(allowedKeys, key)
+			}
+			rows, err := tx.Query(ctx, `SELECT id,stable_key FROM test_units WHERE snapshot_id=$1 AND stable_key=ANY($2)`, plan.SnapshotID, allowedKeys)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var id uuid.UUID
+				var key string
+				if err := rows.Scan(&id, &key); err != nil {
+					rows.Close()
+					return err
+				}
+				unitIDs[key] = id
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
+		}
+		type historyAggregate struct {
+			durationMillis int64
+			retryCount     int
+			hasPass        bool
+			hasFailure     bool
+			failureHash    string
+		}
+		historyByKey := make(map[string]*historyAggregate)
+		attemptsByKey := make(map[string]map[int]bool)
 		for _, unit := range result.UnitResults {
 			if _, ok := allowed[unit.TestUnitKey]; !ok {
 				return fmt.Errorf("result includes unit outside immutable plan: %s", unit.TestUnitKey)
 			}
-			if unit.Attempt < 1 || unit.DurationMillis < 0 {
+			if unit.Attempt < 1 || unit.Attempt > 100 || unit.DurationMillis < 0 {
 				return errors.New("invalid unit result attempt or duration")
 			}
+			switch unit.Status {
+			case "PASSED", "FAILED", "ERROR", "SKIPPED":
+			default:
+				return errors.New("invalid unit result status")
+			}
+			if attemptsByKey[unit.TestUnitKey] == nil {
+				attemptsByKey[unit.TestUnitKey] = make(map[int]bool)
+			}
+			if attemptsByKey[unit.TestUnitKey][unit.Attempt] {
+				return errors.New("duplicate unit result attempt")
+			}
+			attemptsByKey[unit.TestUnitKey][unit.Attempt] = true
 			summary := unit.Summary
 			if len(summary) == 0 {
 				summary = json.RawMessage(`{}`)
@@ -242,6 +293,117 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 				return errors.New("unit result summary must be valid JSON")
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO execution_unit_results(tenant_id,execution_id,test_unit_key,attempt,status,duration_ms,failure_fingerprint,report_hash,summary_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, tenantID, executionID, unit.TestUnitKey, unit.Attempt, unit.Status, unit.DurationMillis, unit.FailureFingerprint, unit.ReportHash, summary); err != nil {
+				return err
+			}
+			var resultMeta struct {
+				RetryCount   int    `json:"retry_count"`
+				FailureClass string `json:"failure_class"`
+			}
+			_ = json.Unmarshal(summary, &resultMeta)
+			if resultMeta.RetryCount < 0 || resultMeta.RetryCount > 100 {
+				return errors.New("unit result retry count is outside the allowed range")
+			}
+			aggregate := historyByKey[unit.TestUnitKey]
+			if aggregate == nil {
+				aggregate = &historyAggregate{}
+				historyByKey[unit.TestUnitKey] = aggregate
+			}
+			retries := unit.Attempt - 1 + resultMeta.RetryCount
+			if retries > aggregate.retryCount {
+				aggregate.retryCount = retries
+			}
+			comparableAttempt := false
+			if unit.Status == "PASSED" {
+				aggregate.hasPass = true
+				comparableAttempt = true
+			} else if unit.Status == "FAILED" {
+				aggregate.hasFailure = true
+				comparableAttempt = true
+				if unit.FailureFingerprint != "" {
+					aggregate.failureHash = unit.FailureFingerprint
+				}
+			}
+			if unit.Status == "ERROR" && (resultMeta.FailureClass == "ERROR" || resultMeta.FailureClass == "FAILED") {
+				// Native reports may classify a test case as ERROR; command, setup,
+				// parser, timeout, and other infrastructure errors stay out of the
+				// comparable test history.
+				aggregate.hasFailure = true
+				comparableAttempt = true
+				if unit.FailureFingerprint != "" {
+					aggregate.failureHash = unit.FailureFingerprint
+				}
+			}
+			if resultMeta.FailureClass == "FLAKY" {
+				aggregate.hasPass = true
+				aggregate.hasFailure = true
+				comparableAttempt = true
+			}
+			if comparableAttempt {
+				aggregate.durationMillis += unit.DurationMillis
+			}
+		}
+		for _, attempts := range attemptsByKey {
+			for attempt := 1; attempt <= len(attempts); attempt++ {
+				if !attempts[attempt] {
+					return errors.New("unit result attempts must be contiguous from one")
+				}
+			}
+		}
+		for key, aggregate := range historyByKey {
+			if aggregate.durationMillis <= 0 || !aggregate.hasPass && !aggregate.hasFailure {
+				continue
+			}
+			historyOutcome := "PASS"
+			flakeClass := ""
+			if aggregate.hasFailure {
+				historyOutcome = "FAIL"
+				flakeClass = "REPRODUCED"
+			}
+			if aggregate.hasPass && aggregate.hasFailure {
+				flakeClass = "FLAKY"
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO test_history(tenant_id,repository_id,stable_test_key,adapter,source_snapshot_hash,environment_digest,build_config_digest,test_config_digest,started_at,duration_ms,cpu_ms,outcome,failure_fingerprint,retry_count,flake_classification)
+				SELECT $1,p.repository_id,u.stable_key,u.adapter,s.tree_hash,e.environment_digest,s.config_digest,s.test_config_digest,e.started_at,$4,0,$5,$6,$7,$8
+				FROM executions e JOIN verification_plans p ON p.id=e.plan_id AND p.tenant_id=e.tenant_id
+				JOIN repository_snapshots s ON s.id=p.snapshot_id AND s.repository_id=p.repository_id
+				JOIN test_units u ON u.snapshot_id=p.snapshot_id AND u.stable_key=$3
+				WHERE e.tenant_id=$1 AND e.id=$2`, tenantID, executionID, key, aggregate.durationMillis, historyOutcome, aggregate.failureHash, aggregate.retryCount, flakeClass); err != nil {
+				return err
+			}
+		}
+		var snapshotBuildDigest, snapshotTestConfigDigest string
+		if len(result.Coverage) > 0 {
+			if err := tx.QueryRow(ctx, `SELECT config_digest,test_config_digest FROM repository_snapshots WHERE tenant_id=$1 AND id=$2`, tenantID, plan.SnapshotID).Scan(&snapshotBuildDigest, &snapshotTestConfigDigest); err != nil {
+				return err
+			}
+		}
+		for _, observation := range result.Coverage {
+			if err := domain.ValidateCoverageObservation(observation); err != nil {
+				return err
+			}
+			if _, ok := allowed[observation.TestUnitKey]; !ok {
+				return fmt.Errorf("coverage references a unit outside the immutable plan: %s", observation.TestUnitKey)
+			}
+			if observation.RunID != executionID || observation.EnvironmentFingerprint != executionEnvironment || observation.BuildConfigDigest != snapshotBuildDigest || observation.TestConfigDigest != snapshotTestConfigDigest || observation.ObservedAt.Before(executionStartedAt) || observation.ObservedAt.After(result.CompletedAt.Add(5*time.Minute)) {
+				return errors.New("coverage provenance does not match the completed execution")
+			}
+			unitID, ok := unitIDs[observation.TestUnitKey]
+			if !ok {
+				return fmt.Errorf("coverage references an unknown test unit: %s", observation.TestUnitKey)
+			}
+			var nodeID uuid.UUID
+			if observation.CoveredStableKey != "" {
+				if err := tx.QueryRow(ctx, `SELECT id FROM graph_nodes WHERE snapshot_id=$1 AND stable_key=$2 AND node_type='SOURCE_FILE'`, plan.SnapshotID, observation.CoveredStableKey).Scan(&nodeID); err != nil {
+					return fmt.Errorf("coverage references unknown source %q: %w", observation.CoveredStableKey, err)
+				}
+			} else if err := tx.QueryRow(ctx, `SELECT id FROM graph_nodes WHERE snapshot_id=$1 AND path=$2 AND node_type='SOURCE_FILE' ORDER BY stable_key LIMIT 1`, plan.SnapshotID, observation.CoveredPath).Scan(&nodeID); err != nil {
+				return fmt.Errorf("coverage references unknown source path %q: %w", observation.CoveredPath, err)
+			}
+			if !observation.SuiteLevel || observation.TestSpecific {
+				return errors.New("aggregate adapter coverage must remain suite-level until per-test contexts are available")
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO coverage_observations(tenant_id,snapshot_id,test_unit_id,covered_node_id,precision,source,report_hash,run_id,environment_digest,build_config_digest,test_config_digest,line_start,line_end,suite_level,test_specific,evidence_confidence,observed_at)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, tenantID, plan.SnapshotID, unitID, nodeID, observation.Precision, observation.SourceType, observation.ReportHash, executionID.String(), observation.EnvironmentFingerprint, observation.BuildConfigDigest, observation.TestConfigDigest, observation.LineStart, observation.LineEnd, observation.SuiteLevel, observation.TestSpecific, observation.EvidenceConfidence, observation.ObservedAt); err != nil {
 				return err
 			}
 		}

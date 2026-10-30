@@ -63,7 +63,7 @@ func (*Adapter) ValidateConfig(c adapters.AdapterConfig) error {
 				}
 			}
 		}
-		for _, p := range append(append([]string(nil), t.MapsPaths...), t.CoveragePaths...) {
+		for _, p := range append(append(append([]string(nil), t.MapsPaths...), t.ReportPaths...), t.CoveragePaths...) {
 			if _, err := compileGlob(p); err != nil {
 				return fmt.Errorf("generic target %q: %w", t.ID, err)
 			}
@@ -148,6 +148,12 @@ func (*Adapter) Discover(_ context.Context, req adapters.DiscoverRequest) (adapt
 			u.DisplayName = t.ID
 		}
 		out.Units = append(out.Units, u)
+		for _, pattern := range t.MapsPaths {
+			out.SourceMappings = append(out.SourceMappings, adapters.SourceTestMapping{
+				TargetKey: t.ID, PathPattern: filepath.ToSlash(pattern), Precision: "FILE",
+				EvidenceSource: "generic:repository-config", Confidence: 0.75,
+			})
+		}
 	}
 	sort.Slice(out.Units, func(i, j int) bool { return out.Units[i].Key < out.Units[j].Key })
 	return out, nil

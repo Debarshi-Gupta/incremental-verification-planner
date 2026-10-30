@@ -154,6 +154,14 @@ paths:
       parameters: [{ $ref: '#/components/parameters/Limit' }, { name: cursor, in: query, schema: { type: string } }]
       responses:
         '200': { description: Calibration, audit safety and execution metrics with sample counts }
+  /repositories/{id}/accepted-changes:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Audits]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AcceptedChangeRequest' } } } }
+      responses:
+        '201': { description: Accepted-change outcome recorded for time and cost calibration }
   /repositories/{id}/quarantine:
     parameters: [{ $ref: '#/components/parameters/UUID' }]
     post:
@@ -170,6 +178,20 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AcknowledgeRequest' } } } }
       responses:
         '200': { description: Remediation acknowledged; clearing still requires a later clean comparable audit }
+  /repositories/{id}/quarantine/acknowledge:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Audits]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AcknowledgeRequest' } } } }
+      responses:
+        '200': { description: Remediation acknowledged for the body-supplied full quarantine scope key }
+  /repositories/{id}/quarantine/clear:
+    parameters: [{ $ref: '#/components/parameters/UUID' }]
+    post:
+      tags: [Audits]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/QuarantineClearRequest' } } } }
+      responses:
+        '200': { description: Quarantine cleared after acknowledgement, expiry, and a clean comparable audit }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
@@ -273,6 +295,19 @@ components:
         selected_fingerprint: { type: object }
         full_fingerprint: { type: object }
         failure_output_hash: { type: string }
+    AcceptedChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [change_key, started_at, accepted_at, accepted_correct]
+      properties:
+        change_key: { type: string, minLength: 1, maxLength: 512 }
+        started_at: { type: string, format: date-time }
+        accepted_at: { type: string, format: date-time }
+        accepted_correct: { type: boolean }
+        compute_ms: { type: integer, minimum: 0 }
+        cost_microusd: { type: integer, minimum: 0 }
+        human_correction_minutes: { type: integer, minimum: 0 }
+        execution_id: { type: string, format: uuid }
     QuarantineRequest:
       type: object
       additionalProperties: false
@@ -286,6 +321,14 @@ components:
       additionalProperties: false
       required: [reason]
       properties:
+        scope_key: { type: string, maxLength: 200, description: Required when using the body-scoped acknowledgement route; optional when scope is in the path. }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    QuarantineClearRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_key, reason]
+      properties:
+        scope_key: { type: string, minLength: 1, maxLength: 200 }
         reason: { type: string, minLength: 1, maxLength: 1000 }
     ErrorResponse:
       type: object

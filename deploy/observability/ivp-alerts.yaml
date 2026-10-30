@@ -10,6 +10,17 @@ groups:
           summary: "IVP found an omitted failing test"
           description: "An audit miss was recorded for adapter {{ $labels.adapter }} ({{ $labels.severity }}). Keep the affected scope on full verification until quarantine is resolved."
 
+      - alert: IVPComparableAuditVolumeLow
+        expr: |
+          sum(increase(ivp_plan_requests_total{mode=~"FAST_FEEDBACK|RISK_BASED_CI",outcome="READY"}[7d])) > 10
+          and on() sum(increase(ivp_audit_runs_total[7d])) == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Selective plans have no comparable audit samples"
+          description: "Ready selective CI plans were created in the last seven days, but no audit run was recorded. Check the scheduled audit workflow and comparable environment configuration."
+
       - alert: IVPAPI5xxRatioHigh
         expr: |
           sum(rate(ivp_api_requests_total{status=~"5.."}[5m]))

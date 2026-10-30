@@ -30,6 +30,7 @@ type RepositorySnapshot struct {
 	SubmoduleDigest     string    `json:"submodule_digest"`
 	ToolchainDigest     string    `json:"toolchain_digest"`
 	BuildConfigDigest   string    `json:"build_config_digest"`
+	TestConfigDigest    string    `json:"test_config_digest"`
 	AdapterSetDigest    string    `json:"adapter_set_digest"`
 	GraphVersion        int64     `json:"graph_version"`
 	EvidenceGeneratedAt time.Time `json:"evidence_generated_at"`

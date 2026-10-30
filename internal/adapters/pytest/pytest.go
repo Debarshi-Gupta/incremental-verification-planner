@@ -97,6 +97,13 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	key := strings.Join(req.TargetKeys, ",")
 	report := filepath.ToSlash(filepath.Join(".ivp", "reports", "pytest-"+shortHash(key)+".xml"))
 	args = append(args, "-q", "--junitxml="+report)
+	var coveragePaths []string
+	for _, coveragePath := range req.Config.CoveragePaths {
+		if strings.EqualFold(filepath.Ext(coveragePath), ".xml") {
+			args = append(args, "--cov", "--cov-report=xml:"+coveragePath)
+			coveragePaths = append(coveragePaths, coveragePath)
+		}
+	}
 	for _, key := range req.TargetKeys {
 		if strings.ContainsAny(key, "\r\n\x00") || strings.HasPrefix(key, "/") || strings.Contains(key, "\\") {
 			return adapters.ExecutionCommand{}, fmt.Errorf("invalid pytest node ID %q", key)
@@ -119,7 +126,7 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	if maxOut <= 0 {
 		maxOut = 1 << 20
 	}
-	return adapters.ExecutionCommand{Executable: a.executable(), Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: key, ReportPaths: []string{report}, Filtered: true}, nil
+	return adapters.ExecutionCommand{Executable: a.executable(), Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: key, ReportPaths: []string{report}, CoveragePaths: coveragePaths, Filtered: true}, nil
 }
 func configuredFull(req adapters.MaterializeRequest) (adapters.ExecutionCommand, error) {
 	exe, args, e := native.ConfiguredCommand(req.Root, req.Config.FullSuiteArgv)

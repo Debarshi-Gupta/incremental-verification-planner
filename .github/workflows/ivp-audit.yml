@@ -1,0 +1,54 @@
+name: IVP scheduled audit
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sampled-audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build IVP CLI
+        run: |
+          mkdir -p dist
+          go build -trimpath -o dist/ivp ./cmd/ivp
+      - name: Run authoritative CI verification
+        id: verify
+        env:
+          IVP_SERVER_ENDPOINT: ${{ vars.IVP_SERVER_ENDPOINT }}
+          IVP_TENANT_ID: ${{ vars.IVP_TENANT_ID }}
+          IVP_OIDC_AUDIENCE: ${{ vars.IVP_OIDC_AUDIENCE }}
+          IVP_POLICY_VERIFY_PUBLIC_KEY: ${{ secrets.IVP_POLICY_VERIFY_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          base="$(git rev-parse HEAD^)"
+          ./dist/ivp verify --base "$base" --mode FAST_FEEDBACK --report dist/ivp-audit-verification.json
+      - name: Run rate-sampled isolated audit
+        if: ${{ !cancelled() && steps.verify.outcome != 'skipped' }}
+        env:
+          IVP_SERVER_ENDPOINT: ${{ vars.IVP_SERVER_ENDPOINT }}
+          IVP_TENANT_ID: ${{ vars.IVP_TENANT_ID }}
+          IVP_OIDC_AUDIENCE: ${{ vars.IVP_OIDC_AUDIENCE }}
+          IVP_POLICY_VERIFY_PUBLIC_KEY: ${{ secrets.IVP_POLICY_VERIFY_PUBLIC_KEY }}
+          IVP_REQUIRED_SERVICES_DIGEST: ${{ secrets.IVP_REQUIRED_SERVICES_DIGEST }}
+        run: ./dist/ivp audit --run latest --sample --rule-scope all
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        if: always()
+        with:
+          name: ivp-scheduled-audit-report
+          path: dist/ivp-audit-verification.json
+          if-no-files-found: ignore

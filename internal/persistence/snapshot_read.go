@@ -17,8 +17,8 @@ func (d *DB) LoadSnapshot(ctx context.Context, tenantID, repositoryID, snapshotI
 	var graphVersion int64
 	var completeness []byte
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,adapter_digest,graph_version,completeness_json,created_at
-			FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND id=$3`, tenantID, repositoryID, snapshotID).Scan(&s.ID, &s.RepositoryID, &s.CommitSHA, &s.BaseSHA, &s.TreeHash, &s.WorktreeHash, &s.SubmoduleDigest, &s.ToolchainDigest, &s.BuildConfigDigest, &s.AdapterSetDigest, &graphVersion, &completeness, &s.EvidenceGeneratedAt); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json,created_at
+			FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND id=$3`, tenantID, repositoryID, snapshotID).Scan(&s.ID, &s.RepositoryID, &s.CommitSHA, &s.BaseSHA, &s.TreeHash, &s.WorktreeHash, &s.SubmoduleDigest, &s.ToolchainDigest, &s.BuildConfigDigest, &s.TestConfigDigest, &s.AdapterSetDigest, &graphVersion, &completeness, &s.EvidenceGeneratedAt); err != nil {
 			return err
 		}
 		s.GraphVersion = graphVersion

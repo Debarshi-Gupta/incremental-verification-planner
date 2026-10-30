@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -94,6 +96,68 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 		result.Complete = false
 		result.Reasons = append(result.Reasons, "Jest discovered no test files")
 	}
+	// Jest's dependency resolver can provide change-set-specific related-test
+	// candidates without executing tests. Missing/deleted inputs are treated as
+	// incomplete because the resolver cannot prove their consumers this run.
+	changedInputs := make([]string, 0, len(req.ChangedFiles))
+	for _, changed := range req.ChangedFiles {
+		if _, err := adapters.ResolveWithin(req.Root, changed); err != nil {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Jest related-test input escaped the repository")
+			continue
+		}
+		info, err := os.Stat(filepath.Join(req.Root, filepath.FromSlash(changed)))
+		if err != nil || !info.Mode().IsRegular() {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Jest related-test input is unavailable")
+			continue
+		}
+		changedInputs = append(changedInputs, filepath.ToSlash(changed))
+	}
+	if len(changedInputs) > 0 {
+		relatedArgs := append([]string(nil), req.Config.Options...)
+		relatedArgs = append(relatedArgs, "--listTests", "--json", "--findRelatedTests")
+		relatedArgs = append(relatedArgs, changedInputs...)
+		relatedOutput, _, relatedErr := a.run(ctx, req.Root, relatedArgs, req.MaxOutputBytes)
+		if relatedErr != nil {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Jest related-test candidate discovery failed")
+		} else {
+			var relatedPaths []string
+			if json.Unmarshal(relatedOutput, &relatedPaths) != nil {
+				result.Complete = false
+				result.Reasons = append(result.Reasons, "Jest related-test candidate output was malformed")
+			} else {
+				relatedSet := map[string]bool{}
+				for _, raw := range relatedPaths {
+					rel := filepath.ToSlash(raw)
+					if filepath.IsAbs(raw) {
+						abs, pathErr := adapters.ResolveWithin(absRoot, raw)
+						if pathErr != nil {
+							result.Complete = false
+							continue
+						}
+						relPath, pathErr := filepath.Rel(absRoot, abs)
+						if pathErr != nil {
+							result.Complete = false
+							continue
+						}
+						rel = filepath.ToSlash(relPath)
+					}
+					if !seen[rel] {
+						result.Complete = false
+						result.Reasons = append(result.Reasons, "Jest related-test candidate was absent from discovered tests")
+						continue
+					}
+					relatedSet[rel] = true
+				}
+			for rel := range relatedSet {
+				result.AffectedTargets = append(result.AffectedTargets, rel)
+			}
+			sort.Strings(result.AffectedTargets)
+			}
+		}
+	}
 	result.Version, _ = a.Version(ctx, req.Root)
 	return result, nil
 }
@@ -115,6 +179,9 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	}
 	args := append([]string(nil), req.Config.Options...)
 	args = append(args, "--runTestsByPath")
+	if len(req.Config.CoveragePaths) > 0 {
+		args = append(args, "--coverage", "--coverageReporters=lcov")
+	}
 	for _, key := range req.TargetKeys {
 		if filepath.IsAbs(key) || strings.ContainsAny(key, "\r\n\x00") || strings.Contains(key, "\\") {
 			return adapters.ExecutionCommand{}, fmt.Errorf("invalid Jest test path %q", key)
@@ -141,7 +208,7 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	if maxOut <= 0 {
 		maxOut = 1 << 20
 	}
-	return adapters.ExecutionCommand{Executable: exe, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: key, ReportPaths: []string{report}, Filtered: true}, nil
+	return adapters.ExecutionCommand{Executable: exe, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: key, ReportPaths: []string{report}, CoveragePaths: append([]string(nil), req.Config.CoveragePaths...), Filtered: true}, nil
 }
 func configuredFull(req adapters.MaterializeRequest) (adapters.ExecutionCommand, error) {
 	exe, args, e := native.ConfiguredCommand(req.Root, req.Config.FullSuiteArgv)

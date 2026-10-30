@@ -16,6 +16,7 @@ type Policy struct {
 	MaxChangedFilesForSelectivePlan  int
 	GraphStaleness                   time.Duration
 	CoverageStaleness                time.Duration
+	HistoryWindow                    time.Duration
 	DependencyFanoutEscalation       int
 	DependencyCap                    int
 	MinimumCostFloorMillis           int64

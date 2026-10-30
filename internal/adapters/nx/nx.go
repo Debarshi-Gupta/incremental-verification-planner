@@ -77,10 +77,11 @@ type projectTarget struct {
 	Options        map[string]any             `json:"options"`
 }
 type projectJSON struct {
-	Name       string                   `json:"name"`
-	Root       string                   `json:"root"`
-	SourceRoot string                   `json:"sourceRoot"`
-	Targets    map[string]projectTarget `json:"targets"`
+	Name                 string                   `json:"name"`
+	Root                 string                   `json:"root"`
+	SourceRoot           string                   `json:"sourceRoot"`
+	ImplicitDependencies []string                 `json:"implicitDependencies"`
+	Targets              map[string]projectTarget `json:"targets"`
 }
 
 func parseProject(data []byte) (projectJSON, error) {
@@ -104,6 +105,8 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 	if e != nil {
 		return adapters.DiscoveryResult{Complete: false, Reasons: []string{"Nx returned malformed project JSON"}}, e
 	}
+	projectBuildTargets := make(map[string]adapters.BuildTarget, len(projects))
+	var affectedProjects []string
 	for _, name := range projects {
 		if name == "" || strings.ContainsAny(name, "\r\n\x00") {
 			out.Complete = false
@@ -125,6 +128,23 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 		if project.Name != "" {
 			name = project.Name
 		}
+		projectRoot := filepath.ToSlash(strings.TrimSpace(project.Root))
+		if projectRoot == "" {
+			projectRoot = filepath.ToSlash(strings.TrimSpace(project.SourceRoot))
+		}
+		sourcePattern := "**"
+		if projectRoot != "" {
+			sourcePattern = strings.TrimSuffix(projectRoot, "/") + "/**"
+		}
+		dependencies := make([]string, 0, len(project.ImplicitDependencies))
+		for _, dependency := range project.ImplicitDependencies {
+			dependency = strings.TrimSpace(dependency)
+			if dependency != "" && !strings.HasPrefix(dependency, "!") {
+				dependencies = append(dependencies, dependency)
+			}
+		}
+		sort.Strings(dependencies)
+		projectBuildTargets[name] = adapters.BuildTarget{Key: name, SourcePattern: sourcePattern, Dependencies: dependencies, EvidenceSource: "nx:project-metadata", Confidence: 0.70}
 		targetNames := make([]string, 0, len(project.Targets))
 		for target := range project.Targets {
 			targetNames = append(targetNames, target)
@@ -168,9 +188,17 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 				if isCheckTarget(target) {
 					kind = "CHECK"
 				}
-				out.Units = append(out.Units, adapters.TestUnit{Key: unitKey, DisplayName: unitKey, Kind: kind, Runner: details.Executor, Module: name, Paths: mappedPaths, SelectableGranularity: "NX_PROJECT_TARGET", Filterable: false, Timeout: 30 * time.Minute, ReportPaths: paths})
+				out.Units = append(out.Units, adapters.TestUnit{Key: unitKey, DisplayName: unitKey, Kind: kind, Runner: details.Executor, Module: name, Paths: mappedPaths, BuildTargets: []string{name}, SelectableGranularity: "NX_PROJECT_TARGET", Filterable: true, Timeout: 30 * time.Minute, ReportPaths: paths})
 			}
 		}
+	}
+	projectNames := make([]string, 0, len(projectBuildTargets))
+	for project := range projectBuildTargets {
+		projectNames = append(projectNames, project)
+	}
+	sort.Strings(projectNames)
+	for _, project := range projectNames {
+		out.BuildTargets = append(out.BuildTargets, projectBuildTargets[project])
 	}
 	// The native affected query is useful metadata but does not replace the full
 	// inventory needed for safe plans. If it fails, preserve the inventory while
@@ -186,10 +214,25 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 				out.Complete = false
 				out.Reasons = append(out.Reasons, "Nx affected-project output was malformed")
 			} else {
-				out.AffectedTargets = affected
+				affectedProjects = affected
 			}
 		}
 	}
+	targetsByProject := make(map[string][]string, len(projects))
+	for _, unit := range out.Units {
+		targetsByProject[unit.Module] = append(targetsByProject[unit.Module], unit.Key)
+	}
+	for _, project := range affectedProjects {
+		keys := targetsByProject[project]
+		if len(keys) == 0 {
+			out.Complete = false
+			out.Reasons = append(out.Reasons, "Nx affected project has no discovered test/check target: "+project)
+			continue
+		}
+		out.AffectedTargets = append(out.AffectedTargets, keys...)
+	}
+	sort.Strings(out.AffectedTargets)
+	out.AffectedTargets = unique(out.AffectedTargets)
 	if len(out.Units) == 0 {
 		out.Complete = false
 		out.Reasons = append(out.Reasons, "no Nx test/check targets discovered")
@@ -197,6 +240,20 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 	out.Version, _ = a.Version(ctx, req.Root)
 	return out, nil
 }
+
+func unique(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func interestingTarget(name, executor string) bool {
 	n := strings.ToLower(name)
 	e := strings.ToLower(executor)
@@ -254,7 +311,7 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	}
 	checkOnly := known.Kind == "CHECK" || isCheckTarget(parts[1])
 	reports := append([]string(nil), known.ReportPaths...)
-	coverage := append([]string(nil), known.CoveragePaths...)
+	coverage := append(append([]string(nil), known.CoveragePaths...), req.Config.CoveragePaths...)
 	if strings.Contains(strings.ToLower(known.Runner), "jest") && len(reports) == 0 {
 		report := filepath.ToSlash(filepath.Join(".ivp", "reports", "nx-"+shortHash(key)+".json"))
 		reports = []string{report}

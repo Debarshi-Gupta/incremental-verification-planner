@@ -17,6 +17,9 @@ oidc:
   issuerKey: issuer
   audienceKey: audience
   clientIDKey: client-id
+policySigning:
+  existingSecret: ivp-policy-signing
+  privateKeyKey: ed25519-private-key
 artifacts:
   backend: filesystem
   directory: /var/lib/ivp/artifacts

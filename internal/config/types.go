@@ -27,6 +27,7 @@ type AnalysisConfig struct {
 	MaxChangedFilesForSelectivePlan  int    `yaml:"max_changed_files_for_selective_plan" json:"max_changed_files_for_selective_plan"`
 	GraphStalenessMinutes            int    `yaml:"graph_staleness_minutes" json:"graph_staleness_minutes"`
 	CoverageStalenessDays            int    `yaml:"coverage_staleness_days" json:"coverage_staleness_days"`
+	HistoryWindowDays                int    `yaml:"history_window_days" json:"history_window_days"`
 	RequireCleanDependencyResolution bool   `yaml:"require_clean_dependency_resolution" json:"require_clean_dependency_resolution"`
 }
 
@@ -98,6 +99,7 @@ type ExecutionConfig struct {
 	FullSuiteArgv  []string `yaml:"full_suite_argv" json:"full_suite_argv"`
 	TimeoutSeconds int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 	MaxOutputBytes int      `yaml:"max_output_bytes" json:"max_output_bytes"`
+	FailureRetryCount int    `yaml:"failure_retry_count" json:"failure_retry_count"`
 }
 
 type AdaptersConfig struct {
@@ -115,6 +117,7 @@ type GradleConfig struct {
 	WrapperRequired      bool     `yaml:"wrapper_required" json:"wrapper_required"`
 	UnitTestTasks        []string `yaml:"unit_test_tasks" json:"unit_test_tasks"`
 	IntegrationTestTasks []string `yaml:"integration_test_tasks" json:"integration_test_tasks"`
+	CoveragePaths        []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type MavenConfig struct {
@@ -122,26 +125,31 @@ type MavenConfig struct {
 	WrapperPreferred bool `yaml:"wrapper_preferred" json:"wrapper_preferred"`
 	SurefireEnabled  bool `yaml:"surefire_enabled" json:"surefire_enabled"`
 	FailsafeEnabled  bool `yaml:"failsafe_enabled" json:"failsafe_enabled"`
+	CoveragePaths    []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type BazelConfig struct {
 	Enabled                     bool `yaml:"enabled" json:"enabled"`
 	UseConfiguredTargetPatterns bool `yaml:"use_configured_target_patterns" json:"use_configured_target_patterns"`
+	CoveragePaths               []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type NxConfig struct {
 	Enabled         bool     `yaml:"enabled" json:"enabled"`
 	TestTargetNames []string `yaml:"test_target_names" json:"test_target_names"`
+	CoveragePaths   []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type PytestConfig struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
 	ConfigFile string `yaml:"config_file" json:"config_file"`
+	CoveragePaths []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type JestConfig struct {
 	Enabled         bool `yaml:"enabled" json:"enabled"`
 	ConfigDiscovery bool `yaml:"config_discovery" json:"config_discovery"`
+	CoveragePaths   []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type GenericConfig struct {
@@ -157,6 +165,8 @@ type GenericUnitConfig struct {
 	CWD                      string   `yaml:"cwd" json:"cwd"`
 	MapsPaths                []string `yaml:"maps_paths" json:"maps_paths"`
 	DependsOn                []string `yaml:"depends_on" json:"depends_on"`
+	ReportPaths              []string `yaml:"report_paths" json:"report_paths"`
+	CoveragePaths            []string `yaml:"coverage_paths" json:"coverage_paths"`
 	RiskLabels               []string `yaml:"risk_labels" json:"risk_labels"`
 	Mandatory                bool     `yaml:"mandatory" json:"mandatory"`
 	TimeoutSeconds           int      `yaml:"timeout_seconds" json:"timeout_seconds"`

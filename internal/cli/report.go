@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/ivp/ivp/internal/config"
 	"github.com/ivp/ivp/internal/domain"
 	"github.com/ivp/ivp/internal/security"
 	"github.com/spf13/cobra"
@@ -15,8 +19,61 @@ import (
 func renderReport(cmd *cobra.Command, name, format string) error {
 	data, err := os.ReadFile(name)
 	if err != nil {
-		return exitError{4, errors.New("run reports must be retrieved from the configured IVP API or supplied as a JSON file")}
+		return exitError{4, errors.New("report file is unavailable")}
 	}
+	return renderReportData(cmd, data, format)
+}
+
+func (c *commands) report(ctx context.Context, cmd *cobra.Command, cfg config.Config, reference, format string) error {
+	if data, err := os.ReadFile(reference); err == nil {
+		return renderReportData(cmd, data, format)
+	}
+	id, err := uuid.Parse(reference)
+	if err != nil {
+		return exitError{2, errors.New("report reference must be an execution UUID or readable JSON file")}
+	}
+	client, err := newAPIClient(cfg)
+	if err != nil {
+		return err
+	}
+	var value map[string]any
+	if err := client.request(ctx, http.MethodGet, "/api/v1/executions/"+id.String(), nil, "", &value); err != nil {
+		return err
+	}
+	planIDText, _ := value["plan_id"].(string)
+	planID, parseErr := uuid.Parse(planIDText)
+	if parseErr != nil {
+		return exitError{6, errors.New("execution response did not include a valid plan id")}
+	}
+	var plan domain.VerificationPlan
+	if err := client.request(ctx, http.MethodGet, "/api/v1/plans/"+planID.String(), nil, "", &plan); err != nil {
+		return err
+	}
+	if plan.ID != planID {
+		return exitError{6, errors.New("plan response did not match the execution's plan id")}
+	}
+	// Keep execution fields at the report root for existing JSON/SARIF consumers,
+	// and attach the immutable plan rationale required for a human review.
+	value["plan"] = plan
+	value["mode"] = plan.Mode
+	value["status"] = plan.Status
+	value["risk_level"] = plan.RiskLevel
+	value["risk_score"] = plan.RiskScore
+	value["explanation"] = plan.Explanation
+	value["selection_confidence"] = plan.SelectionConfidence
+	value["weighted_coverage"] = plan.WeightedCoverage
+	value["estimated_duration_ms"] = plan.EstimatedDurationMillis
+	value["selected_units"] = plan.SelectedUnits
+	value["omitted_units"] = plan.OmittedUnits
+	value["escalation_reasons"] = plan.EscalationReasons
+	data, err := json.Marshal(value)
+	if err != nil {
+		return exitError{6, err}
+	}
+	return renderReportData(cmd, data, format)
+}
+
+func renderReportData(cmd *cobra.Command, data []byte, format string) error {
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
 		return exitError{2, fmt.Errorf("report JSON is invalid: %w", err)}
@@ -36,9 +93,42 @@ func renderReport(cmd *cobra.Command, name, format string) error {
 		if err := json.Unmarshal(data, &report); err != nil {
 			return exitError{2, err}
 		}
-		for _, key := range []string{"id", "mode", "status", "risk_level", "explanation", "outcome"} {
+		for _, key := range []string{"id", "mode", "status", "risk_level", "risk_score", "selection_confidence", "weighted_coverage", "estimated_duration_ms", "explanation", "outcome"} {
 			if val, ok := report[key]; ok {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s: %v\n", strings.ReplaceAll(key, "_", " "), val)
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", strings.ReplaceAll(key, "_", " "), security.Redact(fmt.Sprint(val), 500))
+			}
+		}
+		for _, key := range []string{"selected_units", "omitted_units", "escalation_reasons"} {
+			items, ok := report[key].([]any)
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: %d\n", strings.ReplaceAll(key, "_", " "), len(items))
+			for _, raw := range items {
+				item, ok := raw.(map[string]any)
+				if !ok {
+					fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", security.Redact(fmt.Sprint(raw), 500))
+					continue
+				}
+				label := item["stable_key"]
+				if label == nil {
+					label = item["code"]
+				}
+				detail := item["explanation"]
+				if detail == nil {
+					detail = item["detail"]
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  - %s: %s\n", security.Redact(fmt.Sprint(label), 240), security.Redact(fmt.Sprint(detail), 500))
+			}
+		}
+		if units, ok := report["unit_results"].([]any); ok {
+			fmt.Fprintf(cmd.OutOrStdout(), "Unit results: %d\n", len(units))
+			for _, raw := range units {
+				unit, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  %v %v (%v ms)\n", unit["test_unit_key"], unit["status"], unit["duration_ms"])
 			}
 		}
 		return nil

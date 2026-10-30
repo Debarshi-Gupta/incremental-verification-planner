@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ivp/ivp/internal/analysis"
 	"github.com/ivp/ivp/internal/adapters"
 	"github.com/ivp/ivp/internal/adapters/bazel"
 	"github.com/ivp/ivp/internal/adapters/generic"
@@ -79,6 +80,44 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 	versions := map[string]string{}
 	complete := true
 	var reasons []string
+	edgeLimitReported := false
+	appendEdge := func(edge domain.GraphEdge) {
+		if len(edges) >= 2_000_000 {
+			complete = false
+			if !edgeLimitReported {
+				reasons = append(reasons, "graph edge inventory exceeded the API limit")
+				edgeLimitReported = true
+			}
+			return
+		}
+		edges = append(edges, edge)
+	}
+	type dependencyEvidence struct {
+		adapter string
+		from    uuid.UUID
+		refs    []string
+	}
+	type buildLinkEvidence struct {
+		adapter string
+		from    uuid.UUID
+		refs    []string
+	}
+	var pendingDependencies []dependencyEvidence
+	var pendingBuildLinks []buildLinkEvidence
+	type discoveredBuildTarget struct {
+		adapter string
+		target  adapters.BuildTarget
+	}
+	var discoveredBuildTargets []discoveredBuildTarget
+	unitNodesByRef := map[string][]uuid.UUID{}
+	affectedByAdapter := map[string][]string{}
+	type sourceMappingEvidence struct {
+		adapter string
+		mapping adapters.SourceTestMapping
+	}
+	var sourceMappings []sourceMappingEvidence
+	sourceCoverageComplete := map[string]bool{}
+	buildDependencyComplete := map[string]bool{}
 	now := time.Now().UTC()
 	snapshotID := uuid.New()
 	for _, adapter := range all {
@@ -114,12 +153,37 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 		for _, reason := range result.Reasons {
 			reasons = append(reasons, adapter.ID()+": "+security.Redact(reason, 160))
 		}
+		if len(result.AffectedTargets) > 0 {
+			affectedByAdapter[adapter.ID()] = append([]string(nil), result.AffectedTargets...)
+		}
+		for _, mapping := range result.SourceMappings {
+			sourceMappings = append(sourceMappings, sourceMappingEvidence{adapter: adapter.ID(), mapping: mapping})
+		}
+		for _, target := range result.BuildTargets {
+			discoveredBuildTargets = append(discoveredBuildTargets, discoveredBuildTarget{adapter: adapter.ID(), target: target})
+		}
+		sourceCoverageComplete[adapter.ID()] = result.SourceToTestEvidenceComplete
+		buildDependencyComplete[adapter.ID()] = result.BuildDependencyEvidenceComplete
 		for _, found := range result.Units {
+			if len(units) >= 200000 {
+				complete = false
+				reasons = append(reasons, "test-unit inventory exceeded the API limit")
+				break
+			}
 			u := adapters.DomainUnit(adapter.ID(), snapshotID, found)
 			if adapter.ID() != "generic" {
 				u.StableKey = adapter.ID() + ":" + u.StableKey
 			}
-			u.SourcePaths = append([]string(nil), found.Paths...)
+			u.SourcePaths = u.SourcePaths[:0]
+			for _, sourcePath := range found.Paths {
+				sourcePath = filepath.ToSlash(sourcePath)
+				if _, pathErr := domain.NormalizeRepoPath(sourcePath); pathErr != nil {
+					complete = false
+					reasons = append(reasons, adapter.ID()+" emitted an invalid unit path")
+					continue
+				}
+				u.SourcePaths = append(u.SourcePaths, sourcePath)
+			}
 			if u.StableKey == "" {
 				complete = false
 				continue
@@ -133,11 +197,14 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 			if u.TargetRef == "" {
 				u.TargetRef = found.Key
 			}
-			u.Metadata = map[string]any{"display_name": found.DisplayName, "dependencies": append([]string(nil), found.Dependencies...), "report_paths": append([]string(nil), found.ReportPaths...), "coverage_paths": append([]string(nil), found.CoveragePaths...), "timeout_millis": found.Timeout.Milliseconds(), "trusted_config": found.TrustedConfig}
+			u.Metadata = map[string]any{"display_name": found.DisplayName, "runner": found.Runner, "dependencies": append([]string(nil), found.Dependencies...), "report_paths": append([]string(nil), found.ReportPaths...), "coverage_paths": append([]string(nil), found.CoveragePaths...), "timeout_millis": found.Timeout.Milliseconds(), "trusted_config": found.TrustedConfig}
 			u.LastSeenAt = now
 			units = append(units, u)
 			unitNodeID := uuid.New()
 			nodeType := domain.NodeTestTarget
+			if u.UnitType == domain.UnitBuildTarget {
+				nodeType = domain.NodeBuildTarget
+			}
 			if u.UnitType == domain.UnitTestCase || u.UnitType == domain.UnitTestFile || u.UnitType == domain.UnitTestMethod {
 				nodeType = domain.NodeTestCase
 			}
@@ -145,28 +212,214 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 				nodeType = domain.NodeCheckTarget
 			}
 			var primaryPath string
-			if len(found.Paths) > 0 {
-				primaryPath = filepath.ToSlash(found.Paths[0])
+			if len(u.SourcePaths) > 0 {
+				primaryPath = u.SourcePaths[0]
 			}
 			nodes = append(nodes, domain.GraphNode{ID: unitNodeID, SnapshotID: snapshotID, NodeType: nodeType, StableKey: "unit:" + u.StableKey, Path: primaryPath, DisplayName: found.DisplayName, Labels: append([]string(nil), found.RiskLabels...), EvidenceSource: adapter.ID(), Confidence: 0.95, ObservedAt: now, Attributes: map[string]any{"unit_key": u.StableKey}})
-			if len(found.Paths) == 0 {
+			addUnitNodeRef(unitNodesByRef, adapter.ID()+"\x00"+u.TargetRef, unitNodeID)
+			addUnitNodeRef(unitNodesByRef, adapter.ID()+"\x00"+u.StableKey, unitNodeID)
+			pendingDependencies = append(pendingDependencies, dependencyEvidence{adapter: adapter.ID(), from: unitNodeID, refs: append([]string(nil), found.Dependencies...)})
+			pendingBuildLinks = append(pendingBuildLinks, buildLinkEvidence{adapter: adapter.ID(), from: unitNodeID, refs: append([]string(nil), found.BuildTargets...)})
+		}
+	}
+	buildNodeByRef := make(map[string]uuid.UUID, len(discoveredBuildTargets))
+	buildTargetByRef := make(map[string]adapters.BuildTarget, len(discoveredBuildTargets))
+	for _, item := range discoveredBuildTargets {
+		target := item.target
+		if target.Key == "" || target.EvidenceSource == "" || target.Confidence <= 0 || target.Confidence > 1 || strings.ContainsAny(target.SourcePattern, "\\\r\n\x00") {
+			complete = false
+			reasons = append(reasons, item.adapter+" emitted invalid build-target evidence")
+			continue
+		}
+		ref := item.adapter + "\x00" + target.Key
+		if _, duplicate := buildNodeByRef[ref]; duplicate {
+			complete = false
+			reasons = append(reasons, item.adapter+" emitted a duplicate build-target key")
+			continue
+		}
+		nodeID := uuid.New()
+		stableKey := "build:" + item.adapter + ":" + target.Key
+		nodes = append(nodes, domain.GraphNode{ID: nodeID, SnapshotID: snapshotID, NodeType: domain.NodeBuildTarget, StableKey: stableKey,
+			DisplayName: target.Key, EvidenceSource: target.EvidenceSource, Confidence: target.Confidence, ObservedAt: now,
+			Attributes: map[string]any{"adapter": item.adapter, "target_key": target.Key, "source_pattern": target.SourcePattern}})
+		buildNodeByRef[ref] = nodeID
+		buildTargetByRef[ref] = target
+	}
+	for _, item := range discoveredBuildTargets {
+		from := buildNodeByRef[item.adapter+"\x00"+item.target.Key]
+		if from == uuid.Nil {
+			continue
+		}
+		for _, dependency := range item.target.Dependencies {
+			to := buildNodeByRef[item.adapter+"\x00"+dependency]
+			if to == uuid.Nil || to == from {
 				complete = false
-				reasons = append(reasons, adapter.ID()+" unit lacks source path or coverage mapping")
+				reasons = append(reasons, item.adapter+" emitted an unresolved build-target dependency")
 				continue
 			}
-			for _, p := range found.Paths {
-				p = filepath.ToSlash(p)
-				if _, pathErr := domain.NormalizeRepoPath(p); pathErr != nil {
-					complete = false
-					reasons = append(reasons, adapter.ID()+" emitted an invalid source path")
+			appendEdge(domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: from, ToNodeID: to, EdgeType: domain.EdgeDependsOn,
+				Confidence: item.target.Confidence, EvidenceSource: item.target.EvidenceSource, ObservedAt: now})
+		}
+	}
+	for _, link := range pendingBuildLinks {
+		for _, ref := range link.refs {
+			to := buildNodeByRef[link.adapter+"\x00"+ref]
+			if to == uuid.Nil {
+				complete = false
+				reasons = append(reasons, link.adapter+" test unit referenced an undiscovered build target")
+				continue
+			}
+			appendEdge(domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: link.from, ToNodeID: to, EdgeType: domain.EdgeDependsOn,
+				Confidence: 0.85, EvidenceSource: link.adapter + ":unit-build-target", ObservedAt: now})
+		}
+	}
+	for _, dependency := range pendingDependencies {
+		for _, ref := range dependency.refs {
+			matches := unitNodesByRef[dependency.adapter+"\x00"+ref]
+			if len(matches) != 1 {
+				complete = false
+				reasons = append(reasons, dependency.adapter+" emitted an unresolved or ambiguous build dependency")
+				continue
+			}
+			to := matches[0]
+			if to == dependency.from {
+				complete = false
+				reasons = append(reasons, dependency.adapter+" emitted a self-referential build dependency")
+				continue
+			}
+			appendEdge(domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: dependency.from, ToNodeID: to, EdgeType: domain.EdgeDependsOn, Confidence: 0.9, EvidenceSource: dependency.adapter + ":discovery", ObservedAt: now})
+		}
+	}
+	sourceNodeByPath := make(map[string]uuid.UUID)
+	for _, node := range nodes {
+		if node.NodeType == domain.NodeSourceFile && node.Path != "" {
+			sourceNodeByPath[node.Path] = node.ID
+		}
+	}
+	addSourceNode := func(path, evidenceSource string, attributes map[string]any) uuid.UUID {
+		path = filepath.ToSlash(path)
+		if id := sourceNodeByPath[path]; id != uuid.Nil {
+			return id
+		}
+		if _, pathErr := domain.NormalizeRepoPath(path); pathErr != nil {
+			complete = false
+			reasons = append(reasons, "repository inventory contains an invalid path")
+			return uuid.Nil
+		}
+		if len(nodes) >= 500000 {
+			complete = false
+			reasons = append(reasons, "source inventory exceeded the graph node limit")
+			return uuid.Nil
+		}
+		id := uuid.New()
+		nodes = append(nodes, domain.GraphNode{ID: id, SnapshotID: snapshotID, NodeType: domain.NodeSourceFile, StableKey: "file:" + path, Path: path, DisplayName: path, EvidenceSource: evidenceSource, Confidence: 1, ObservedAt: now, Attributes: attributes})
+		sourceNodeByPath[path] = id
+		return id
+	}
+	inventoryCmd := exec.CommandContext(ctx, "git", "ls-files", "-z")
+	inventoryCmd.Dir = root
+	tracked, inventoryErr := inventoryCmd.Output()
+	if inventoryErr != nil {
+		complete = false
+		reasons = append(reasons, "tracked source inventory could not be enumerated")
+	} else if len(tracked) > 64<<20 {
+		complete = false
+		reasons = append(reasons, "tracked source inventory exceeded the input limit")
+	} else {
+		for _, path := range strings.Split(string(tracked), "\x00") {
+			if path == "" {
+				continue
+			}
+			addSourceNode(path, "git-index", map[string]any{"tracked": true})
+		}
+	}
+	for _, change := range changes.Files {
+		for _, path := range []string{change.Path, change.OldPath} {
+			if path == "" {
+				continue
+			}
+			path = filepath.ToSlash(path)
+			if _, pathErr := domain.NormalizeRepoPath(path); pathErr != nil {
+				complete = false
+				reasons = append(reasons, "git change metadata contains an invalid repository path")
+				continue
+			}
+			addSourceNode(path, "git-diff", map[string]any{"change_status": change.Status})
+		}
+	}
+	for ref, target := range buildTargetByRef {
+		if target.SourcePattern == "" {
+			continue
+		}
+		buildNodeID := buildNodeByRef[ref]
+		for sourcePath, sourceID := range sourceNodeByPath {
+			if !analysis.GlobMatch(target.SourcePattern, sourcePath) {
+				continue
+			}
+			adapterID := strings.SplitN(ref, "\x00", 2)[0]
+			appendEdge(domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: buildNodeID, ToNodeID: sourceID,
+				EdgeType: domain.EdgeDependsOn, Confidence: target.Confidence, EvidenceSource: target.EvidenceSource,
+				ObservedAt: now, Attributes: map[string]any{"precision": "PROJECT_SOURCE_MEMBERSHIP", "path_pattern": target.SourcePattern, "adapter": adapterID}})
+		}
+	}
+	// Related-test results are explicit adapter discovery evidence tied to the
+	// current change set. They are retained with provenance and conservative
+	// confidence, and never promoted to complete evidence by themselves.
+	for adapterID, targets := range affectedByAdapter {
+		for _, target := range targets {
+			matches := unitNodesByRef[adapterID+"\x00"+target]
+			if len(matches) != 1 {
+				complete = false
+				reasons = append(reasons, adapterID+" related-test candidate was unresolved or ambiguous")
+				continue
+			}
+			for _, change := range changes.Files {
+				for _, changedPath := range []string{change.Path, change.OldPath} {
+					if changedPath == "" {
+						continue
+					}
+					sourceID := sourceNodeByPath[filepath.ToSlash(changedPath)]
+					if sourceID == uuid.Nil {
+						continue
+					}
+					appendEdge(domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: matches[0], ToNodeID: sourceID, EdgeType: domain.EdgeDependsOn, Confidence: 0.65, EvidenceSource: adapterID + ":related-test-candidates", ObservedAt: now, Attributes: map[string]any{"precision": "CHANGE_SET_CANDIDATE", "change_set_head": changes.HeadSHA}})
+				}
+			}
+		}
+	}
+	// Explicit mappings and native project-membership relations are usable for
+	// candidate generation when the changed path matches their declared scope.
+	// Module membership is recorded as a build dependency, not as proof that a
+	// test directly covered the source file.
+	for _, evidence := range sourceMappings {
+		mapping := evidence.mapping
+		if mapping.Confidence <= 0 || mapping.Confidence > 1 || (mapping.Precision != "FILE" && mapping.Precision != "MODULE") || strings.ContainsAny(mapping.PathPattern, "\\\r\n\x00") {
+			complete = false
+			reasons = append(reasons, evidence.adapter+" source mapping was invalid")
+			continue
+		}
+		matches := unitNodesByRef[evidence.adapter+"\x00"+mapping.TargetKey]
+		if len(matches) != 1 || mapping.PathPattern == "" {
+			complete = false
+			reasons = append(reasons, evidence.adapter+" source mapping was unresolved or invalid")
+			continue
+		}
+		for _, change := range changes.Files {
+			for _, changedPath := range []string{change.Path, change.OldPath} {
+				if changedPath == "" || !analysis.GlobMatch(mapping.PathPattern, filepath.ToSlash(changedPath)) {
 					continue
 				}
-				sourceID := findSourceNode(nodes, p)
+				sourceID := sourceNodeByPath[filepath.ToSlash(changedPath)]
 				if sourceID == uuid.Nil {
-					sourceID = uuid.New()
-					nodes = append(nodes, domain.GraphNode{ID: sourceID, SnapshotID: snapshotID, NodeType: domain.NodeSourceFile, StableKey: "file:" + p, Path: p, DisplayName: p, EvidenceSource: adapter.ID(), Confidence: 0.95, ObservedAt: now})
+					continue
 				}
-				edges = append(edges, domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: unitNodeID, ToNodeID: sourceID, EdgeType: domain.EdgeTestCovers, Confidence: 0.85, EvidenceSource: adapter.ID(), ObservedAt: now})
+				edgeType := domain.EdgeTestCovers
+				if mapping.Precision == "MODULE" {
+					edgeType = domain.EdgeDependsOn
+				}
+				appendEdge(domain.GraphEdge{ID: uuid.New(), SnapshotID: snapshotID, FromNodeID: matches[0], ToNodeID: sourceID,
+					EdgeType: edgeType, Confidence: mapping.Confidence, EvidenceSource: mapping.EvidenceSource, ObservedAt: now,
+					Attributes: map[string]any{"precision": mapping.Precision, "path_pattern": mapping.PathPattern}})
 			}
 		}
 	}
@@ -177,6 +430,19 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 	if len(units) == 0 {
 		complete = false
 		reasons = append(reasons, "no runnable verification units were discovered")
+	}
+	// An empty edge set can be valid (for example, an isolated project with no
+	// declared dependencies). Completeness is established only by adapter
+	// attestations below; observed edges alone never promote the snapshot.
+	for _, adapterID := range discovered {
+		if !sourceCoverageComplete[adapterID] {
+			complete = false
+			reasons = append(reasons, adapterID+" did not attest complete source-to-test evidence")
+		}
+		if !buildDependencyComplete[adapterID] {
+			complete = false
+			reasons = append(reasons, adapterID+" did not attest complete build dependency evidence")
+		}
 	}
 	// Duplicate stable keys from two adapters are unsafe because planner and
 	// persistence identity is per snapshot; fail closed before upload.
@@ -204,7 +470,22 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 	if err != nil {
 		return exitError{6, err}
 	}
-	snapshot := domain.RepositorySnapshot{ID: snapshotID, RepositoryID: repo.ID, CommitSHA: changes.HeadSHA, BaseSHA: changes.BaseSHA, TreeHash: changes.TreeHash, WorktreeHash: changes.WorktreeHash, SubmoduleDigest: changes.SubmoduleDigest, ToolchainDigest: toolchainDigest, BuildConfigDigest: configDigest, AdapterSetDigest: adapterDigest, GraphVersion: 1, EvidenceGeneratedAt: now, IsComplete: complete, CompletenessReasons: uniqueSorted(reasons)}
+	testConfigDigest, err := domain.CanonicalDigest(struct {
+		BuildConfigDigest string
+		Adapters          config.AdaptersConfig
+		FullSuiteArgv     []string
+		FailureRetryCount int
+	}{configDigest, cfg.Adapters, cfg.Execution.FullSuiteArgv, cfg.Execution.FailureRetryCount})
+	if err != nil {
+		return exitError{6, err}
+	}
+	for i := range units {
+		if units[i].Metadata == nil {
+			units[i].Metadata = map[string]any{}
+		}
+		units[i].Metadata["test_config_digest"] = testConfigDigest
+	}
+	snapshot := domain.RepositorySnapshot{ID: snapshotID, RepositoryID: repo.ID, CommitSHA: changes.HeadSHA, BaseSHA: changes.BaseSHA, TreeHash: changes.TreeHash, WorktreeHash: changes.WorktreeHash, SubmoduleDigest: changes.SubmoduleDigest, ToolchainDigest: toolchainDigest, BuildConfigDigest: configDigest, TestConfigDigest: testConfigDigest, AdapterSetDigest: adapterDigest, GraphVersion: 1, EvidenceGeneratedAt: now, IsComplete: complete, CompletenessReasons: uniqueSorted(reasons)}
 	record := indexRecord{Snapshot: snapshot, Units: units, Nodes: nodes, Edges: edges, ChangedFiles: changes.Files, AdapterVersions: versions, Adapters: sorted(discovered)}
 	cachePath, err := adapters.ResolveWithin(root, filepath.Join(".ivp", "index.json"))
 	if err != nil {
@@ -246,6 +527,18 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 	return nil
 }
 
+func addUnitNodeRef(index map[string][]uuid.UUID, key string, nodeID uuid.UUID) {
+	if key == "" || nodeID == uuid.Nil {
+		return
+	}
+	for _, existing := range index[key] {
+		if existing == nodeID {
+			return
+		}
+	}
+	index[key] = append(index[key], nodeID)
+}
+
 func registry() []adapters.Adapter {
 	return []adapters.Adapter{gradle.New(), maven.New(), bazel.New(), nx.New(), pytest.New(), jest.New(), generic.New()}
 }
@@ -258,14 +551,6 @@ func changedPaths(files []domain.ChangedFile) []string {
 		}
 	}
 	return out
-}
-func findSourceNode(nodes []domain.GraphNode, path string) uuid.UUID {
-	for _, node := range nodes {
-		if node.NodeType == domain.NodeSourceFile && node.Path == path {
-			return node.ID
-		}
-	}
-	return uuid.Nil
 }
 func safeVersion(version string) string {
 	version = security.Redact(strings.TrimSpace(version), 128)
@@ -368,6 +653,9 @@ func buildConfigDigest(ctx context.Context, root string, changes []domain.Change
 func isBuildConfigPath(p string) bool {
 	base := strings.ToLower(filepath.Base(p))
 	lower := strings.ToLower(filepath.ToSlash(p))
+	if lower == ".ivp/config.yaml" || lower == ".ivp/config.yml" || lower == "ivp.yaml" || lower == "ivp.yml" {
+		return true
+	}
 	if strings.Contains(lower, "/migrations/") || strings.HasPrefix(lower, "migrations/") {
 		return true
 	}

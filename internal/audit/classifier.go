@@ -34,6 +34,7 @@ type Failure struct {
 	RelatedToChange         bool   `json:"related_to_change"`
 	ReviewedNotAttributable bool   `json:"reviewed_not_attributable"`
 	Flaky                   bool   `json:"flaky"`
+	RepeatCount             int    `json:"repeat_count,omitempty"`
 }
 type Disposition string
 
@@ -107,7 +108,12 @@ func Classify(in Input) Result {
 		return result
 	}
 	if len(in.Failures) == 0 {
-		result.Record = makeRecord(in, domain.AuditFailed, nil)
+		// The authoritative suite failed after the selected run passed, but the
+		// reports could not attribute a failing unit. This is unresolved evidence,
+		// not evidence that the selected plan was safe.
+		result.Disposition = DispositionPossible
+		result.Quarantine = true
+		result.Record = makeRecord(in, domain.AuditPossibleMiss, nil)
 		return result
 	}
 	selected := make(map[string]struct{}, len(in.SelectedKeys))

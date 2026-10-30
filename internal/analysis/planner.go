@@ -239,6 +239,23 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	if invalidCoverage {
 		addEscalation(domain.EscReportParseFailed, "coverage or test-unit evidence was malformed, ambiguous, or referenced an unknown unit")
 	}
+	// Per-unit history is already filtered to comparable environment and test
+	// configuration digests. Attach its failures only to impacted entities that
+	// this candidate has evidence to exercise, so unrelated failures do not
+	// raise change risk or bias the marginal selector.
+	for _, candidate := range candidates {
+		if candidate.unit.HistoricalFailures <= 0 {
+			continue
+		}
+		for entityKey, quality := range candidate.coverage {
+			if quality <= 0 || !isChangedKey(entityKey, evidence.ChangedFiles) {
+				continue
+			}
+			evidence.History = append(evidence.History, domain.HistoryObservation{TestUnitKey: candidate.unit.StableKey,
+				RelatedStableKey: entityKey, Comparable: true, Outcome: "FAIL", FailureCount: candidate.unit.HistoricalFailures,
+				SampleCount: candidate.unit.DurationSampleCount, ObservedAt: req.Now, Environment: req.EnvironmentFingerprint})
+		}
+	}
 
 	// Mandatory checks are resolved before optimization. The optimizer has no
 	// operation that removes an entry from this set.
@@ -410,13 +427,6 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 			c.reasons[domain.ReasonMandatoryPolicyCheck] = true
 			c.selected = unit.Selectable
 		}
-		for _, p := range unit.SourcePaths {
-			for entityPath, entity := range entityByPath {
-				if p == entityPath {
-					addCandidateCoverage(c, entity.StableKey, 0.8, domain.ReasonConfiguredPathMapping)
-				}
-			}
-		}
 	}
 	if len(byKey) > 0 {
 		for key, c := range byKey {
@@ -430,6 +440,11 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 		var found []*candidate
 		if c := unitByStableKey[key]; c != nil {
 			found = append(found, c)
+		}
+		if strings.HasPrefix(key, "unit:") {
+			if c := unitByStableKey[strings.TrimPrefix(key, "unit:")]; c != nil {
+				found = append(found, c)
+			}
 		}
 		found = append(found, unitByNodeKey[key]...)
 		return deduplicateCandidates(found)
@@ -619,6 +634,18 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 		}
 		c.reasons[domain.ReasonHistoricalFailureRelevance] = true
 		c.historyGain = math.Max(c.historyGain, math.Min(0.05, 0.01*float64(h.FailureCount)))
+	}
+	for _, c := range byKey {
+		if c.unit.HistoricalFailures <= 0 {
+			continue
+		}
+		for entityKey, quality := range c.coverage {
+			if quality > 0 && isChangedKey(entityKey, evidence.ChangedFiles) {
+				c.reasons[domain.ReasonHistoricalFailureRelevance] = true
+				c.historyGain = math.Max(c.historyGain, math.Min(0.05, 0.01*float64(c.unit.HistoricalFailures)))
+				break
+			}
+		}
 	}
 
 	all := make([]*candidate, 0, len(byKey))

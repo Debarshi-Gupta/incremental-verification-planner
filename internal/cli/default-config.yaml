@@ -9,6 +9,7 @@ analysis:
   max_changed_files_for_selective_plan: 500
   graph_staleness_minutes: 1440
   coverage_staleness_days: 30
+  history_window_days: 180
   require_clean_dependency_resolution: true
 server:
   endpoint: ""
@@ -19,6 +20,7 @@ execution:
   full_suite_argv: []
   timeout_seconds: 3600
   max_output_bytes: 1048576
+  failure_retry_count: 1
 modes:
   default: FAST_FEEDBACK
   observe: { execute_full_suite: true, selected_plan_only_report: true }

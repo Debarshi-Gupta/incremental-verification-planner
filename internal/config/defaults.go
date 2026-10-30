@@ -7,7 +7,7 @@ func Defaults() Config {
 		Version: 1,
 		Analysis: AnalysisConfig{BaseRef: "origin/main", FollowRenames: true, IncludeUntracked: true,
 			MaxChangedFilesForSelectivePlan: 500, GraphStalenessMinutes: 1440,
-			CoverageStalenessDays: 30, RequireCleanDependencyResolution: true},
+			CoverageStalenessDays: 30, HistoryWindowDays: 180, RequireCleanDependencyResolution: true},
 		Server: ServerConfig{ConnectTimeoutSeconds: 3, RequestTimeoutSeconds: 10, OfflinePolicy: "FULL_SUITE_FALLBACK"},
 		Modes: ModesConfig{
 			Default:      domain.ModeFastFeedback,
@@ -19,7 +19,7 @@ func Defaults() Config {
 			LowRiskMinWeightedCoverage: 0.95, MediumRiskMinWeightedCoverage: 0.99,
 			MinimumSelectionConfidence: 0.98, MaxSelectiveEstimatedRuntimeFraction: 0.70,
 			UnknownEvidenceAction: "FULL_SUITE", NonDeterministicTestAction: "INCLUDE_AND_LABEL", IfNoTestsSelected: "FULL_SUITE"},
-		Execution: ExecutionConfig{FullSuiteArgv: []string{}, TimeoutSeconds: 3600, MaxOutputBytes: 1 << 20},
+		Execution: ExecutionConfig{FullSuiteArgv: []string{}, TimeoutSeconds: 3600, MaxOutputBytes: 1 << 20, FailureRetryCount: 1},
 		Safety: SafetyConfig{
 			HardFullSuitePaths: []string{
 				"**/pom.xml", "**/build.gradle", "**/build.gradle.kts", "**/settings.gradle", "**/settings.gradle.kts",

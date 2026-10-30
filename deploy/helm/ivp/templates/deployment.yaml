@@ -107,6 +107,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.oidc.existingSecret }}
                   key: {{ .Values.oidc.clientIDKey }}
+            - name: IVP_POLICY_SIGNING_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.policySigning.existingSecret }}
+                  key: {{ .Values.policySigning.privateKeyKey }}
           readinessProbe:
             httpGet:
               path: /health/ready

@@ -56,11 +56,38 @@ type DiscoverRequest struct {
 }
 
 type DiscoveryResult struct {
-	Units           []TestUnit `json:"units"`
-	Complete        bool       `json:"complete"`
-	Reasons         []string   `json:"reasons,omitempty"`
-	Version         string     `json:"version,omitempty"`
-	AffectedTargets []string   `json:"affected_targets,omitempty"`
+	Units                        []TestUnit `json:"units"`
+	BuildTargets                 []BuildTarget `json:"build_targets,omitempty"`
+	Complete                     bool       `json:"complete"`
+	SourceToTestEvidenceComplete bool       `json:"source_to_test_evidence_complete,omitempty"`
+	BuildDependencyEvidenceComplete bool     `json:"build_dependency_evidence_complete,omitempty"`
+	Reasons                      []string   `json:"reasons,omitempty"`
+	Version                      string     `json:"version,omitempty"`
+	AffectedTargets              []string   `json:"affected_targets,omitempty"`
+	SourceMappings                []SourceTestMapping `json:"source_mappings,omitempty"`
+}
+
+// BuildTarget preserves native project/build dependency evidence separately
+// from test-to-source coverage. SourcePattern is a conservative ownership
+// boundary; it never attests that a test directly covers every file there.
+type BuildTarget struct {
+	Key            string   `json:"key"`
+	SourcePattern  string   `json:"source_pattern,omitempty"`
+	Dependencies   []string `json:"dependencies,omitempty"`
+	EvidenceSource string   `json:"evidence_source"`
+	Confidence     float64  `json:"confidence"`
+}
+
+// SourceTestMapping is an explicit adapter or repository-configured relation
+// from a normalized source path pattern to a discovered test target. The index
+// preserves it as provenance-bearing evidence; it does not by itself attest
+// that the mapping covers every relevant source in the repository.
+type SourceTestMapping struct {
+	TargetKey    string  `json:"target_key"`
+	PathPattern  string  `json:"path_pattern"`
+	Precision    string  `json:"precision"`
+	EvidenceSource string `json:"evidence_source"`
+	Confidence   float64 `json:"confidence"`
 }
 
 type TestUnit struct {
@@ -71,6 +98,7 @@ type TestUnit struct {
 	Module                string        `json:"module,omitempty"`
 	Paths                 []string      `json:"paths,omitempty"`
 	Dependencies          []string      `json:"dependencies,omitempty"`
+	BuildTargets          []string      `json:"build_targets,omitempty"`
 	RiskLabels            []string      `json:"risk_labels,omitempty"`
 	Mandatory             bool          `json:"mandatory,omitempty"`
 	SelectableGranularity string        `json:"selectable_granularity,omitempty"`
@@ -93,6 +121,7 @@ type AdapterConfig struct {
 	RedactEnv          []string     `json:"redact_env,omitempty" yaml:"redact_env,omitempty"`
 	FullSuiteArgv      []string     `json:"full_suite_argv,omitempty" yaml:"full_suite_argv,omitempty"`
 	Options            []string     `json:"options,omitempty" yaml:"options,omitempty"`
+	CoveragePaths      []string     `json:"coverage_paths,omitempty" yaml:"coverage_paths,omitempty"`
 	MaxOutputBytes     int64        `json:"max_output_bytes,omitempty" yaml:"max_output_bytes,omitempty"`
 }
 

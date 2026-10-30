@@ -143,8 +143,13 @@ func (d *DB) SaveSnapshot(ctx context.Context, b SnapshotBundle) (uuid.UUID, err
 	if err := domain.ValidateSnapshot(s); err != nil {
 		return uuid.Nil, err
 	}
-	if s.ToolchainDigest == "" || s.BuildConfigDigest == "" || s.AdapterSetDigest == "" {
-		return uuid.Nil, errors.New("snapshot toolchain, build configuration, and adapter fingerprints are required")
+	if s.TestConfigDigest == "" {
+		// Keep older API clients safe while migrating: their coverage history is
+		// compatible only with the same build configuration.
+		s.TestConfigDigest = s.BuildConfigDigest
+	}
+	if s.ToolchainDigest == "" || s.BuildConfigDigest == "" || s.TestConfigDigest == "" || s.AdapterSetDigest == "" {
+		return uuid.Nil, errors.New("snapshot toolchain, build, test configuration, and adapter fingerprints are required")
 	}
 	completeness, err := json.Marshal(map[string]any{"complete": s.IsComplete, "reasons": s.CompletenessReasons})
 	if err != nil {
@@ -159,10 +164,10 @@ func (d *DB) SaveSnapshot(ctx context.Context, b SnapshotBundle) (uuid.UUID, err
 		if !repoExists {
 			return errors.New("repository not found in tenant")
 		}
-		err := tx.QueryRow(ctx, `INSERT INTO repository_snapshots(id,tenant_id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,adapter_digest,graph_version,completeness_json)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,adapter_digest,graph_version,completeness_json) DO NOTHING RETURNING id`, s.ID, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.AdapterSetDigest, s.GraphVersion, completeness).Scan(&finalID)
+		err := tx.QueryRow(ctx, `INSERT INTO repository_snapshots(id,tenant_id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json) DO NOTHING RETURNING id`, s.ID, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.TestConfigDigest, s.AdapterSetDigest, s.GraphVersion, completeness).Scan(&finalID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return tx.QueryRow(ctx, `SELECT id FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND commit_sha=$3 AND base_sha=$4 AND tree_hash=$5 AND worktree_hash=$6 AND submodule_digest=$7 AND toolchain_digest=$8 AND config_digest=$9 AND adapter_digest=$10 AND graph_version=$11 AND completeness_json=$12`, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.AdapterSetDigest, s.GraphVersion, completeness).Scan(&finalID)
+			return tx.QueryRow(ctx, `SELECT id FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND commit_sha=$3 AND base_sha=$4 AND tree_hash=$5 AND worktree_hash=$6 AND submodule_digest=$7 AND toolchain_digest=$8 AND config_digest=$9 AND test_config_digest=$10 AND adapter_digest=$11 AND graph_version=$12 AND completeness_json=$13`, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.TestConfigDigest, s.AdapterSetDigest, s.GraphVersion, completeness).Scan(&finalID)
 		}
 		if err != nil {
 			return err

@@ -86,6 +86,11 @@ func (c *commands) requestPlan(ctx context.Context, out io.Writer, cfg config.Co
 	if repo.ID != record.Snapshot.RepositoryID {
 		return domain.VerificationPlan{}, exitError{5, errors.New("indexed snapshot belongs to another repository")}
 	}
+	policy, err := client.getTrustedPolicy(ctx, repo.ID)
+	if err != nil {
+		printFallback(out, cfg)
+		return domain.VerificationPlan{}, err
+	}
 	if format != "text" && format != "json" {
 		return domain.VerificationPlan{}, exitError{2, errors.New("plan format must be text or json")}
 	}
@@ -106,6 +111,9 @@ func (c *commands) requestPlan(ctx context.Context, out io.Writer, cfg config.Co
 	}
 	if plan.ID == uuid.Nil {
 		return plan, exitError{6, errors.New("IVP API returned an invalid plan")}
+	}
+	if plan.PolicyVersion != policy.Version {
+		return plan, exitError{5, errors.New("effective policy changed while the plan was being created")}
 	}
 	if outputPath != "" {
 		encoded, err := json.MarshalIndent(plan, "", "  ")

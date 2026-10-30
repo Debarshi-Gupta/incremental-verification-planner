@@ -34,7 +34,7 @@ func (d *DB) RecordAuditAndQuarantine(ctx context.Context, in audit.Input, resul
 	if result.Disposition == audit.DispositionAuditFailed {
 		comparability = "FAILED"
 	}
-	details, err := json.Marshal(map[string]any{"adapter": in.Adapter, "scope_key": scope, "failure_output_hash": in.FailureOutputHash, "disposition": result.Disposition, "selected_fingerprint": in.SelectedFingerprint, "full_fingerprint": in.FullFingerprint})
+	details, err := json.Marshal(map[string]any{"adapter": in.Adapter, "scope_key": scope, "failure_output_hash": in.FailureOutputHash, "disposition": result.Disposition, "selected_fingerprint": in.SelectedFingerprint, "full_fingerprint": in.FullFingerprint, "failures": in.Failures})
 	if err != nil {
 		return err
 	}
@@ -66,6 +66,23 @@ func (d *DB) RecordAuditAndQuarantine(ctx context.Context, in audit.Input, resul
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO audit_records(id,tenant_id,execution_id,full_execution_id,comparability,outcome,missed_test_keys_json,details_json,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, result.Record.ID, in.TenantID, in.SelectedExecutionID, in.FullExecutionID, comparability, result.Record.Outcome, missed, details, result.Record.CreatedAt); err != nil {
 			return err
+		}
+		for _, failure := range in.Failures {
+			if failure.RepeatCount == 0 {
+				continue
+			}
+			flakeClass := "REPEATED"
+			if failure.Flaky {
+				flakeClass = "FLAKY"
+			}
+			if _, err := tx.Exec(ctx, `UPDATE test_history h SET retry_count=GREATEST(h.retry_count,$4),flake_classification=$5
+				FROM executions e JOIN verification_plans p ON p.id=e.plan_id AND p.tenant_id=e.tenant_id
+				JOIN repository_snapshots s ON s.id=p.snapshot_id AND s.repository_id=p.repository_id
+				WHERE e.tenant_id=$1 AND e.id=$2 AND h.tenant_id=$1 AND h.repository_id=p.repository_id
+				AND h.stable_test_key=$3 AND h.source_snapshot_hash=s.tree_hash
+				AND h.environment_digest=e.environment_digest AND h.started_at=e.started_at`, in.TenantID, in.FullExecutionID, failure.TestUnitKey, failure.RepeatCount, flakeClass); err != nil {
+				return err
+			}
 		}
 		if !result.Quarantine {
 			return nil
@@ -207,10 +224,13 @@ func (d *DB) AcknowledgeQuarantine(ctx context.Context, tenantID, actorID, repos
 	})
 }
 
-func (d *DB) ClearEligibleQuarantine(ctx context.Context, tenantID, repositoryID uuid.UUID, scope string, now time.Time) error {
+func (d *DB) ClearEligibleQuarantine(ctx context.Context, tenantID, actorID, repositoryID uuid.UUID, scope, reason string, now time.Time) error {
+	if scope == "" || reason == "" {
+		return errors.New("scope and clearing reason required")
+	}
 	return d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		var actor uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT acknowledged_by FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND scope_key=$3 AND status='ACKNOWLEDGED' AND acknowledged_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at <= $4 FOR UPDATE`, tenantID, repositoryID, scope, now).Scan(&actor)
+		var acknowledgedBy uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT acknowledged_by FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND scope_key=$3 AND status='ACKNOWLEDGED' AND acknowledged_by IS NOT NULL AND acknowledged_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at <= $4 FOR UPDATE`, tenantID, repositoryID, scope, now).Scan(&acknowledgedBy)
 		if err != nil {
 			return errors.New("quarantine must be acknowledged and expired before clearing")
 		}
@@ -224,7 +244,7 @@ func (d *DB) ClearEligibleQuarantine(ctx context.Context, tenantID, repositoryID
 		if _, err = tx.Exec(ctx, `UPDATE quarantines SET status='CLEARED',cleared_at=$4 WHERE tenant_id=$1 AND repository_id=$2 AND scope_key=$3 AND status='ACKNOWLEDGED'`, tenantID, repositoryID, scope, now); err != nil {
 			return err
 		}
-		return insertAuditEvent(ctx, tx, tenantID, actor, "quarantine.clear", "repository", repositoryID.String(), map[string]any{"scope_key": scope})
+		return insertAuditEvent(ctx, tx, tenantID, actorID, "quarantine.clear", "repository", repositoryID.String(), map[string]any{"scope_key": scope, "reason": reason, "acknowledged_by": acknowledgedBy.String()})
 	})
 }
 

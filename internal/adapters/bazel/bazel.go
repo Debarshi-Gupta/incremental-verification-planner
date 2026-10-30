@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +55,8 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 	}
 	result := adapters.DiscoveryResult{Complete: true}
 	seen := map[string]bool{}
+	buildTargets := map[string]adapters.BuildTarget{}
+	buildDependencies := map[string]map[string]bool{}
 	for _, line := range strings.Split(string(out), "\n") {
 		label := strings.TrimSpace(line)
 		if label == "" {
@@ -76,8 +80,132 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 			result.Reasons = append(result.Reasons, "Bazel target package escapes repository")
 			continue
 		}
-		result.Units = append(result.Units, adapters.TestUnit{Key: label, DisplayName: label, Kind: "BUILD_TARGET", Paths: []string{pkg}, SelectableGranularity: "BAZEL_TEST_TARGET", Filterable: false, Timeout: 45 * time.Minute})
+		// A Bazel test target is an exact, supported selection unit even though
+		// Bazel does not filter individual tests within that target here.
+		pattern := "**"
+		if pkg != "." {
+			pattern = strings.TrimSuffix(pkg, "/") + "/**"
+		}
+		buildTargets[label] = adapters.BuildTarget{Key: label, SourcePattern: pattern, EvidenceSource: "bazel:target-package-membership", Confidence: 0.50}
+		paths := []string(nil)
+		if pkg != "." {
+			paths = []string{pkg}
+		}
+		result.Units = append(result.Units, adapters.TestUnit{Key: label, DisplayName: label, Kind: "BUILD_TARGET", Paths: paths, BuildTargets: []string{label}, SelectableGranularity: "BAZEL_TEST_TARGET", Filterable: true, Timeout: 45 * time.Minute})
 	}
+	testLabels := make([]string, 0, len(result.Units))
+	for _, unit := range result.Units {
+		testLabels = append(testLabels, unit.Key)
+	}
+	sort.Strings(testLabels)
+	for start := 0; start < len(testLabels); start += 50 {
+		end := min(start+50, len(testLabels))
+		expr := `deps(set(` + strings.Join(testLabels[start:end], " ") + `))`
+		graph, _, queryErr := adapters.RunCapture(ctx, req.Root, a.tool(req.Root), []string{"query", expr, "--output=graph"}, req.MaxOutputBytes)
+		if queryErr != nil {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Bazel dependency graph query failed")
+			continue
+		}
+		for _, line := range strings.Split(string(graph), "\n") {
+			parts := strings.SplitN(strings.TrimSpace(line), "->", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			from := bazelGraphLabel(parts[0])
+			to := bazelGraphLabel(strings.TrimSuffix(strings.TrimSpace(parts[1]), ";"))
+			if !validLabel(from) || !validLabel(to) {
+				result.Complete = false
+				result.Reasons = append(result.Reasons, "Bazel dependency graph contained an unsupported label")
+				continue
+			}
+			for _, label := range []string{from, to} {
+				if _, exists := buildTargets[label]; !exists {
+					buildTargets[label] = adapters.BuildTarget{Key: label, SourcePattern: bazelPackagePattern(label), EvidenceSource: "bazel:query-graph", Confidence: 0.80}
+				}
+			}
+			if buildDependencies[from] == nil {
+				buildDependencies[from] = map[string]bool{}
+			}
+			buildDependencies[from][to] = true
+		}
+	}
+	buildKeys := make([]string, 0, len(buildTargets))
+	for key := range buildTargets {
+		buildKeys = append(buildKeys, key)
+	}
+	sort.Strings(buildKeys)
+	for _, key := range buildKeys {
+		target := buildTargets[key]
+		for dependency := range buildDependencies[key] {
+			target.Dependencies = append(target.Dependencies, dependency)
+		}
+		sort.Strings(target.Dependencies)
+		result.BuildTargets = append(result.BuildTargets, target)
+	}
+	knownTests := make(map[string]bool, len(result.Units))
+	for _, unit := range result.Units {
+		knownTests[unit.Key] = true
+	}
+	affected := make(map[string]bool)
+	changedLabels := make([]string, 0, len(req.ChangedFiles))
+	seenChangedLabels := make(map[string]bool)
+	for _, changed := range req.ChangedFiles {
+		if _, pathErr := adapters.ResolveWithin(req.Root, changed); pathErr != nil {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Bazel related-test input escaped the repository")
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(req.Root, filepath.FromSlash(changed))); statErr != nil {
+			// Deleted paths and unavailable files cannot be queried as Bazel file
+			// targets, so retain a complete-verification requirement.
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Bazel related-test input is unavailable")
+			continue
+		}
+		pkg, base := filepath.ToSlash(filepath.Dir(changed)), filepath.Base(changed)
+		if pkg == "." {
+			pkg = ""
+		}
+		fileLabel := "//" + pkg + ":" + base
+		if !validLabel(fileLabel) {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Bazel changed path cannot be represented as a safe target label")
+			continue
+		}
+		if !seenChangedLabels[fileLabel] {
+			seenChangedLabels[fileLabel] = true
+			changedLabels = append(changedLabels, fileLabel)
+		}
+	}
+	// Batch file targets to avoid starting a Bazel server/query process for
+	// every changed path in a large change set.
+	for start := 0; start < len(changedLabels); start += 50 {
+		end := min(start+50, len(changedLabels))
+		expr := `kind(".*_test rule", rdeps(//..., set(` + strings.Join(changedLabels[start:end], " ") + `)))`
+		related, _, queryErr := adapters.RunCapture(ctx, req.Root, a.tool(req.Root), []string{"query", expr, "--output=label"}, req.MaxOutputBytes)
+		if queryErr != nil {
+			result.Complete = false
+			result.Reasons = append(result.Reasons, "Bazel related-test query failed")
+			continue
+		}
+		for _, line := range strings.Split(string(related), "\n") {
+			label := strings.TrimSpace(line)
+			if label == "" {
+				continue
+			}
+			if !validLabel(label) || !knownTests[label] {
+				result.Complete = false
+				result.Reasons = append(result.Reasons, "Bazel related-test query returned an undiscovered test target")
+				continue
+			}
+			affected[label] = true
+		}
+	}
+	for label := range affected {
+		result.AffectedTargets = append(result.AffectedTargets, label)
+	}
+	sort.Strings(result.AffectedTargets)
 	if len(result.Units) == 0 {
 		result.Complete = false
 		result.Reasons = append(result.Reasons, "Bazel query returned no test targets")
@@ -103,7 +231,11 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	if len(req.TargetKeys) == 0 {
 		return adapters.ExecutionCommand{}, adapters.ErrUnknownTarget
 	}
-	args := []string{"test"}
+	commandName := "test"
+	if len(req.Config.CoveragePaths) > 0 {
+		commandName = "coverage"
+	}
+	args := []string{commandName}
 	for _, opt := range req.Config.Options {
 		if strings.HasPrefix(opt, "--build_event_json_file") {
 			return adapters.ExecutionCommand{}, errors.New("Bazel build event output path is controlled by IVP")
@@ -138,7 +270,7 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	if !hasBEP {
 		args = append(args, "--build_event_json_file="+report)
 	}
-	return adapters.ExecutionCommand{Executable: tool, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: strings.Join(req.TargetKeys, ","), ReportPaths: []string{report}}, nil
+	return adapters.ExecutionCommand{Executable: tool, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: strings.Join(req.TargetKeys, ","), ReportPaths: []string{report}, CoveragePaths: append([]string(nil), req.Config.CoveragePaths...)}, nil
 }
 func configuredFull(req adapters.MaterializeRequest) (adapters.ExecutionCommand, error) {
 	exe, args, e := native.ConfiguredCommand(req.Root, req.Config.FullSuiteArgv)
@@ -226,10 +358,15 @@ func parseBEP(data []byte, exitCode int) (adapters.ParsedResults, error) {
 			summaryPassed += passed
 		} else if ev.TestResult != nil {
 			resultTests++
+			status := "FAILED"
 			if strings.EqualFold(ev.TestResult.Status, "PASSED") {
 				resultPassed++
+				status = "PASSED"
 			} else {
 				resultFailed++
+			}
+			if ev.TestResult.Label != "" {
+				out.Cases = append(out.Cases, adapters.TestCase{Name: ev.TestResult.Label, Status: status})
 			}
 		}
 	}
@@ -271,6 +408,27 @@ func validLabel(label string) bool {
 		}
 	}
 	return true
+}
+
+func bazelGraphLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if separator := strings.Index(value, "["); separator >= 0 {
+		value = value[:separator]
+	}
+	value = strings.TrimSpace(strings.TrimSuffix(value, ";"))
+	value = strings.Trim(value, "\"' \t\r\n")
+	return value
+}
+
+func bazelPackagePattern(label string) string {
+	if !validLabel(label) {
+		return ""
+	}
+	pkg := strings.TrimPrefix(strings.SplitN(label, ":", 2)[0], "//")
+	if pkg == "" {
+		return "**"
+	}
+	return strings.TrimSuffix(pkg, "/") + "/**"
 }
 
 var _ adapters.Adapter = (*Adapter)(nil)

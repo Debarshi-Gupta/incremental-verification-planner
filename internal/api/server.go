@@ -154,6 +154,7 @@ type ResultRequest struct {
 	ComputeMillis int64                   `json:"compute_ms"`
 	Summary       ExecutionSummary        `json:"summary"`
 	UnitResults   []ExecutionUnitResult   `json:"unit_results,omitempty"`
+	Coverage      []domain.CoverageObservation `json:"coverage,omitempty"`
 }
 type AuditRequest struct {
 	FullExecutionID     string                  `json:"full_execution_id"`
@@ -171,13 +172,24 @@ type PolicyRequest struct {
 	Policy     json.RawMessage `json:"policy"`
 	PolicyHash string          `json:"policy_hash"`
 }
+type AcceptedChangeRequest struct {
+	ChangeKey                string    `json:"change_key"`
+	StartedAt                time.Time `json:"started_at"`
+	AcceptedAt               time.Time `json:"accepted_at"`
+	AcceptedCorrect          *bool     `json:"accepted_correct"`
+	ComputeMillis            int64     `json:"compute_ms"`
+	CostMicrousd             int64     `json:"cost_microusd"`
+	HumanCorrectionMinutes   int64     `json:"human_correction_minutes"`
+	ExecutionID              string    `json:"execution_id,omitempty"`
+}
 type QuarantineRequest struct {
 	ScopeKey   string     `json:"scope_key"`
 	ReasonCode string     `json:"reason_code"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 type AcknowledgeRequest struct {
-	Reason string `json:"reason"`
+	ScopeKey string `json:"scope_key,omitempty"`
+	Reason   string `json:"reason"`
 }
 
 var (
@@ -252,8 +264,11 @@ func NewRouter(opts Options) http.Handler {
 		api.Get("/artifacts/{id}", downloadArtifact(opts))
 		api.Post("/executions/{id}/audits", dispatch(opts, "audits.submit", 201, "id", []security.Role{security.RoleExecutor, security.RoleMaintainer, security.RoleAuditor}, true))
 		api.Get("/repositories/{id}/metrics", dispatch(opts, "metrics.repository", 200, "id", []security.Role{security.RoleMaintainer, security.RoleAuditor}, false))
+		api.Post("/repositories/{id}/accepted-changes", dispatch(opts, "accepted_changes.submit", 201, "id", []security.Role{security.RoleExecutor, security.RoleMaintainer}, true))
 		api.Post("/repositories/{id}/quarantine", dispatch(opts, "quarantine.create", 201, "id", []security.Role{security.RoleMaintainer}, false))
 		api.Post("/repositories/{id}/quarantine/{scope}/acknowledge", dispatch(opts, "quarantine.acknowledge", 200, "id", []security.Role{security.RoleMaintainer}, false))
+		api.Post("/repositories/{id}/quarantine/acknowledge", dispatch(opts, "quarantine.acknowledge", 200, "id", []security.Role{security.RoleMaintainer}, false))
+		api.Post("/repositories/{id}/quarantine/clear", dispatch(opts, "quarantine.clear", 200, "id", []security.Role{security.RoleMaintainer}, false))
 	})
 	return r
 }
@@ -423,7 +438,7 @@ func dispatch(opts Options, operation string, defaultStatus int, idParam string,
 
 func needsBody(operation string) bool {
 	switch operation {
-	case "repositories.create", "snapshots.create", "policy.update", "plans.create", "executions.start", "executions.result", "audits.submit", "quarantine.create", "quarantine.acknowledge":
+	case "repositories.create", "snapshots.create", "policy.update", "plans.create", "executions.start", "executions.result", "audits.submit", "accepted_changes.submit", "quarantine.create", "quarantine.acknowledge", "quarantine.clear":
 		return true
 	default:
 		return false
@@ -683,9 +698,19 @@ func readPayload(r *http.Request, max int64, operation string) (any, []byte, err
 			if len(v.UnitResults) > 100000 {
 				err = errors.New("unit_results exceeds the request limit")
 			}
+			if len(v.Coverage) > 100000 {
+				err = errors.New("coverage exceeds the request limit")
+			}
 			for _, u := range v.UnitResults {
 				if u.TestUnitKey == "" || u.Attempt < 1 || u.DurationMillis < 0 || !validUnitStatus(u.Status) || u.Summary.RetryCount < 0 {
 					err = errors.New("unit result fields are invalid")
+					break
+				}
+			}
+			for _, observation := range v.Coverage {
+				coverageErr := domain.ValidateCoverageObservation(observation)
+				if coverageErr != nil || !digestPattern.MatchString(observation.ReportHash) || !digestPattern.MatchString(observation.BuildConfigDigest) || !digestPattern.MatchString(observation.TestConfigDigest) {
+					err = errors.New("coverage contains invalid or incomplete provenance")
 					break
 				}
 			}
@@ -697,7 +722,7 @@ func readPayload(r *http.Request, max int64, operation string) (any, []byte, err
 				unitSummary, _ := json.Marshal(u.Summary)
 				units[i] = persistence.UnitResult{TestUnitKey: u.TestUnitKey, Attempt: u.Attempt, Status: u.Status, DurationMillis: u.DurationMillis, FailureFingerprint: u.FailureFingerprint, ReportHash: u.ReportHash, Summary: unitSummary}
 			}
-			value = persistence.ResultSubmission{Outcome: v.Outcome, ExitCode: v.ExitCode, CompletedAt: v.CompletedAt, ElapsedMillis: v.ElapsedMillis, ComputeMillis: v.ComputeMillis, Summary: summary, UnitResults: units}
+			value = persistence.ResultSubmission{Outcome: v.Outcome, ExitCode: v.ExitCode, CompletedAt: v.CompletedAt, ElapsedMillis: v.ElapsedMillis, ComputeMillis: v.ComputeMillis, Summary: summary, UnitResults: units, Coverage: v.Coverage}
 		} else {
 			value = v
 		}
@@ -733,7 +758,7 @@ func readPayload(r *http.Request, max int64, operation string) (any, []byte, err
 			}
 			failureSeen := map[string]bool{}
 			for _, failure := range v.Failures {
-				if !unitKeyPattern.MatchString(failure.TestUnitKey) {
+				if !unitKeyPattern.MatchString(failure.TestUnitKey) || failure.RepeatCount < 0 || failure.RepeatCount > 10 {
 					err = errors.New("failures contains an invalid test unit key")
 					break
 				}
@@ -752,6 +777,22 @@ func readPayload(r *http.Request, max int64, operation string) (any, []byte, err
 			}
 		}
 		value = v
+	case "accepted_changes.submit":
+		var v AcceptedChangeRequest
+		if err = decode(&v); err == nil {
+			if !unitKeyPattern.MatchString(v.ChangeKey) || v.StartedAt.IsZero() || v.AcceptedAt.IsZero() || v.AcceptedAt.Before(v.StartedAt) || v.AcceptedCorrect == nil {
+				err = errors.New("change_key and an ordered started_at/accepted_at interval are required")
+			}
+			if v.ComputeMillis < 0 || v.CostMicrousd < 0 || v.HumanCorrectionMinutes < 0 {
+				err = errors.New("accepted-change cost and duration values cannot be negative")
+			}
+			if v.ExecutionID != "" {
+				if _, parseErr := uuid.Parse(v.ExecutionID); parseErr != nil {
+					err = errors.New("execution_id must be a UUID")
+				}
+			}
+		}
+		value = v
 	case "quarantine.create":
 		var v QuarantineRequest
 		if err = decode(&v); err == nil {
@@ -762,8 +803,20 @@ func readPayload(r *http.Request, max int64, operation string) (any, []byte, err
 		value = v
 	case "quarantine.acknowledge":
 		var v AcknowledgeRequest
-		if err = decode(&v); err == nil && v.Reason == "" {
-			err = errors.New("remediation reason is required")
+		if err = decode(&v); err == nil {
+			if v.Reason == "" {
+				err = errors.New("remediation reason is required")
+			} else if v.ScopeKey != "" && !scopePattern.MatchString(v.ScopeKey) {
+				err = errors.New("scope_key is invalid")
+			}
+		}
+		value = v
+	case "quarantine.clear":
+		var v AcknowledgeRequest
+		if err = decode(&v); err == nil {
+			if v.ScopeKey == "" || !scopePattern.MatchString(v.ScopeKey) || v.Reason == "" {
+				err = errors.New("valid scope_key and clearing reason are required")
+			}
 		}
 		value = v
 	default:

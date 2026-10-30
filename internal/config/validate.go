@@ -24,7 +24,7 @@ func Validate(c Config) error {
 	if strings.TrimSpace(c.Analysis.BaseRef) == "" {
 		return invalid("analysis.base_ref must not be empty")
 	}
-	if c.Analysis.MaxChangedFilesForSelectivePlan < 1 || c.Analysis.GraphStalenessMinutes < 1 || c.Analysis.CoverageStalenessDays < 1 {
+	if c.Analysis.MaxChangedFilesForSelectivePlan < 1 || c.Analysis.GraphStalenessMinutes < 1 || c.Analysis.CoverageStalenessDays < 1 || c.Analysis.HistoryWindowDays < 1 || c.Analysis.HistoryWindowDays > 3650 {
 		return invalid("analysis limits and staleness periods must be positive")
 	}
 	if !c.Analysis.RequireCleanDependencyResolution {
@@ -86,6 +86,9 @@ func Validate(c Config) error {
 	if c.Execution.TimeoutSeconds < 1 || c.Execution.MaxOutputBytes < 1024 || c.Execution.MaxOutputBytes > 64<<20 {
 		return invalid("execution timeout and output bounds are invalid")
 	}
+	if c.Execution.FailureRetryCount < 0 || c.Execution.FailureRetryCount > 3 {
+		return invalid("execution.failure_retry_count must be between 0 and 3")
+	}
 	if err := validateArgv("execution.full_suite_argv", c.Execution.FullSuiteArgv, false); err != nil {
 		return err
 	}
@@ -117,6 +120,17 @@ func Validate(c Config) error {
 	}
 	if err := validateAdapterStrings(c); err != nil {
 		return err
+	}
+	for adapter, paths := range map[string][]string{
+		"gradle": c.Adapters.Gradle.CoveragePaths, "maven": c.Adapters.Maven.CoveragePaths,
+		"bazel": c.Adapters.Bazel.CoveragePaths, "nx": c.Adapters.Nx.CoveragePaths,
+		"pytest": c.Adapters.Pytest.CoveragePaths, "jest": c.Adapters.Jest.CoveragePaths,
+	} {
+		for _, pattern := range paths {
+			if err := validateGlob(pattern); err != nil {
+				return invalid("adapters.%s.coverage_paths: %v", adapter, err)
+			}
+		}
 	}
 	if c.Adapters.Pytest.ConfigFile != "" {
 		if _, err := domain.NormalizeRepoPath(c.Adapters.Pytest.ConfigFile); err != nil {
@@ -172,6 +186,11 @@ func validateGeneric(g GenericConfig) error {
 		for _, pattern := range u.MapsPaths {
 			if err := validateGlob(pattern); err != nil {
 				return invalid("generic unit %q: %v", u.ID, err)
+			}
+		}
+		for _, pattern := range append(append([]string(nil), u.ReportPaths...), u.CoveragePaths...) {
+			if err := validateGlob(pattern); err != nil {
+				return invalid("generic unit %q report/coverage path: %v", u.ID, err)
 			}
 		}
 	}
