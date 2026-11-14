@@ -16,12 +16,18 @@ func (d *DB) LoadSnapshot(ctx context.Context, tenantID, repositoryID, snapshotI
 	var s domain.RepositorySnapshot
 	var graphVersion int64
 	var completeness []byte
+	var adapterVersions []byte
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json,created_at
-			FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND id=$3`, tenantID, repositoryID, snapshotID).Scan(&s.ID, &s.RepositoryID, &s.CommitSHA, &s.BaseSHA, &s.TreeHash, &s.WorktreeHash, &s.SubmoduleDigest, &s.ToolchainDigest, &s.BuildConfigDigest, &s.TestConfigDigest, &s.AdapterSetDigest, &graphVersion, &completeness, &s.EvidenceGeneratedAt); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,dependency_digest,adapter_versions_json,graph_version,completeness_json,created_at
+			FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND id=$3`, tenantID, repositoryID, snapshotID).Scan(&s.ID, &s.RepositoryID, &s.CommitSHA, &s.BaseSHA, &s.TreeHash, &s.WorktreeHash, &s.SubmoduleDigest, &s.ToolchainDigest, &s.BuildConfigDigest, &s.TestConfigDigest, &s.AdapterSetDigest, &s.DependencyDigest, &adapterVersions, &graphVersion, &completeness, &s.EvidenceGeneratedAt); err != nil {
 			return err
 		}
 		s.GraphVersion = graphVersion
+		if len(adapterVersions) > 0 {
+			if err := json.Unmarshal(adapterVersions, &s.AdapterVersions); err != nil {
+				return fmt.Errorf("decode snapshot adapter versions: %w", err)
+			}
+		}
 		var complete struct {
 			Complete bool     `json:"complete"`
 			Reasons  []string `json:"reasons"`
@@ -140,7 +146,7 @@ func (d *DB) LoadSnapshot(ctx context.Context, tenantID, repositoryID, snapshotI
 			return err
 		}
 		rows.Close()
-		rows, err = tx.Query(ctx, `SELECT u.stable_key,n.stable_key,n.path,c.line_start,c.line_end,c.source,c.report_hash,c.run_id,c.observed_at,c.environment_digest,c.build_config_digest,c.test_config_digest,c.precision,c.suite_level,c.test_specific,c.evidence_confidence
+		rows, err = tx.Query(ctx, `SELECT u.stable_key,n.stable_key,n.path,c.line_start,c.line_end,c.source,c.report_hash,c.run_id,c.observed_at,c.environment_digest,c.build_config_digest,c.test_config_digest,c.dependency_digest,c.adapter_version,c.precision,c.suite_level,c.test_specific,c.evidence_confidence
 			FROM coverage_observations c JOIN test_units u ON u.id=c.test_unit_id AND u.snapshot_id=c.snapshot_id JOIN graph_nodes n ON n.id=c.covered_node_id AND n.snapshot_id=c.snapshot_id
 			WHERE c.tenant_id=$1 AND c.snapshot_id=$2 ORDER BY u.stable_key,n.stable_key,c.observed_at`, tenantID, snapshotID)
 		if err != nil {
@@ -149,7 +155,7 @@ func (d *DB) LoadSnapshot(ctx context.Context, tenantID, repositoryID, snapshotI
 		for rows.Next() {
 			var c domain.CoverageObservation
 			var run string
-			if err := rows.Scan(&c.TestUnitKey, &c.CoveredStableKey, &c.CoveredPath, &c.LineStart, &c.LineEnd, &c.SourceType, &c.ReportHash, &run, &c.ObservedAt, &c.EnvironmentFingerprint, &c.BuildConfigDigest, &c.TestConfigDigest, &c.Precision, &c.SuiteLevel, &c.TestSpecific, &c.EvidenceConfidence); err != nil {
+			if err := rows.Scan(&c.TestUnitKey, &c.CoveredStableKey, &c.CoveredPath, &c.LineStart, &c.LineEnd, &c.SourceType, &c.ReportHash, &run, &c.ObservedAt, &c.EnvironmentFingerprint, &c.BuildConfigDigest, &c.TestConfigDigest, &c.DependencyDigest, &c.AdapterVersion, &c.Precision, &c.SuiteLevel, &c.TestSpecific, &c.EvidenceConfidence); err != nil {
 				rows.Close()
 				return err
 			}

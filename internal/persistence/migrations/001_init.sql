@@ -163,6 +163,10 @@ CREATE INDEX coverage_by_snapshot_unit ON coverage_observations(snapshot_id,test
 
 -- Snapshot evidence and audit history are append-only. Plan composition and
 -- version metadata are immutable while its lifecycle status may advance.
+-- The dollar-quoted body is wrapped in goose statement annotations so the
+-- migration runner sends the whole function to PostgreSQL instead of
+-- splitting it at the semicolons inside the body.
+-- +goose StatementBegin
 CREATE FUNCTION ivp_reject_immutable_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -182,7 +186,9 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 DO $$
 DECLARE t text;
 BEGIN
@@ -192,15 +198,24 @@ BEGIN
   EXECUTE 'CREATE TRIGGER immutable_policy_version BEFORE UPDATE OR DELETE ON repository_policies FOR EACH ROW EXECUTE FUNCTION ivp_reject_immutable_mutation()';
   EXECUTE 'CREATE TRIGGER immutable_plan_composition BEFORE UPDATE OR DELETE ON verification_plans FOR EACH ROW EXECUTE FUNCTION ivp_reject_immutable_mutation()';
 END $$;
+-- +goose StatementEnd
 
 -- Every tenant-owned table carries tenant_id and enforces it in PostgreSQL as
 -- defense in depth. Application queries additionally bind tenant_id explicitly.
+--
+-- FORCE ROW LEVEL SECURITY is required: the application connects as the role
+-- that owns the tables, and a table owner bypasses row-level security unless
+-- it is forced. Without FORCE the policy would never apply to the very
+-- connection the application uses, and a cross-tenant read would succeed.
+-- +goose StatementBegin
 DO $$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['tenant_memberships','repositories','repository_policies','repository_snapshots','graph_nodes','graph_edges','test_units','coverage_observations','test_history','verification_plans','verification_plan_units','omitted_plan_units','executions','execution_unit_results','audit_records','quarantines','artifacts','audit_events','idempotency_requests'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
     EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (tenant_id = nullif(current_setting(''ivp.tenant_id'', true), '''')::uuid) WITH CHECK (tenant_id = nullif(current_setting(''ivp.tenant_id'', true), '''')::uuid)', t);
   END LOOP;
 END $$;
+-- +goose StatementEnd
 

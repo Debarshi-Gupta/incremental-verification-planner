@@ -1,0 +1,8 @@
+Build tasks
+-----------
+ assemble - Assembles the outputs of this project.
+ build - Builds this project.
+
+Cleanup tasks
+-------------
+ clean - Deletes the build directory.

@@ -1,0 +1,11 @@
+> Task :test FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':test'.
+> Timeout has been exceeded for worker Gradle Test Executor 2
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+BUILD FAILED in 15m 0s

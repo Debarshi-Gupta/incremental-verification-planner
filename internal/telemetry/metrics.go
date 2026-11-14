@@ -42,6 +42,16 @@ type Metrics struct {
 	ArtifactUploads     *prometheus.CounterVec
 	ArtifactBytes       *prometheus.CounterVec
 	ArtifactStoreErrors *prometheus.CounterVec
+	// CrossTenantViolations counts authorization attempts that explicitly
+	// target another tenant's resources (LLD 15.3).
+	CrossTenantViolations prometheus.Counter
+	// AuditMissUnacknowledged is the age in hours of the oldest audit miss
+	// that is still unacknowledged; the alert fires when it passes the
+	// configured response SLA (LLD 15.3).
+	AuditMissUnacknowledged prometheus.Gauge
+	// AuditMissUnacknowledgedBreaches counts the unacknowledged misses that
+	// are already past the configured response SLA.
+	AuditMissUnacknowledgedBreaches prometheus.Gauge
 }
 
 func NewMetrics() *Metrics {
@@ -66,8 +76,14 @@ func NewMetrics() *Metrics {
 		ArtifactUploads:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ivp_artifact_uploads_total", Help: "Sanitized test report uploads by media type."}, []string{"media_type"}),
 		ArtifactBytes:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ivp_artifact_bytes_total", Help: "Sanitized test report bytes accepted by media type."}, []string{"media_type"}),
 		ArtifactStoreErrors: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ivp_artifact_store_errors_total", Help: "Artifact object-store failures by bounded operation."}, []string{"operation"}),
+		CrossTenantViolations: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ivp_cross_tenant_violations_total", Help: "Authorization attempts that explicitly targeted another tenant's resources."}),
+		AuditMissUnacknowledged: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ivp_audit_miss_unacknowledged_hours", Help: "Age in hours of the oldest unacknowledged audit miss."}),
+		AuditMissUnacknowledgedBreaches: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ivp_audit_miss_unacknowledged_sla_breaches", Help: "Unacknowledged audit misses that are past the configured response SLA."}),
 	}
-	r.MustRegister(m.PlanRequests, m.PlanDuration, m.SelectedUnits, m.FullFallback, m.ExecutionDuration, m.TestCompute, m.EstimatedActual, m.AuditRuns, m.AuditMisses, m.SelectionConfidence, m.WeightedCoverage, m.GraphCompleteness, m.AdapterErrors, m.Quarantines, m.APIRequests, m.APILatency, m.ArtifactUploads, m.ArtifactBytes, m.ArtifactStoreErrors)
+	r.MustRegister(m.PlanRequests, m.PlanDuration, m.SelectedUnits, m.FullFallback, m.ExecutionDuration, m.TestCompute, m.EstimatedActual, m.AuditRuns, m.AuditMisses, m.SelectionConfidence, m.WeightedCoverage, m.GraphCompleteness, m.AdapterErrors, m.Quarantines, m.APIRequests, m.APILatency, m.ArtifactUploads, m.ArtifactBytes, m.ArtifactStoreErrors, m.CrossTenantViolations, m.AuditMissUnacknowledged, m.AuditMissUnacknowledgedBreaches)
 	return m
 }
 

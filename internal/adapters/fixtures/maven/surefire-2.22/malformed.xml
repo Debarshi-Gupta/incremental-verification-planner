@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="com.example.AccountServiceTest" tests="2" errors="0" skipped="0" failures="1" time="0.058">
+  <properties>
+    <property name="java.version" value="17.0.9"/>
+    <property name="java.vendor" value="Eclipse Adoptium"/>
+    <property name="surefire.reportFormat" value="plain"/>
+  </properties>
+  <testcase name="createsAccount" classname="com.example.AccountServiceTest" time="0.021"/>
+  <testcase name="rejectsDuplicateEmail" classname="com.example.AccountServiceTest" time="0.018">
+    <failure message="expected <true> but was <false>" type="AssertionError">unescaped corruption</failure>
+  </testcase>
+</testsuite>

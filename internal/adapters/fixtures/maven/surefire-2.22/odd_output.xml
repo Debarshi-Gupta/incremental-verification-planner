@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- console tail: [33m3 passing, 0 failing[0m | leaked: password=hunter2 AKIAFAKEEXAMPLEKEY -->
+<testsuite name="com.example.Ünïcode Suite" tests="3" errors="0" skipped="0" failures="0" time="0.077">
+  <properties>
+    <property name="java.version" value="17.0.9"/>
+    <property name="java.vendor" value="Eclipse Adoptium"/>
+    <property name="surefire.reportFormat" value="plain"/>
+  </properties>
+  <testcase name="путь  с  пробелами ok" classname="com.example.Ünïcode Suite" time="0.012"/>
+  <testcase name="测试 naïve emoji 🎉 works" classname="com.example.Ünïcode Suite" time="0.019"/>
+  <testcase name="API key AKIAFAKEEXAMPLEKEY accepted" classname="com.example.Ünïcode Suite" time="0.014">
+    <system-out>login password=hunter2 for staging; retry 0/3</system-out>
+  </testcase>
+</testsuite>

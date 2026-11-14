@@ -128,14 +128,22 @@ func (d *DB) GetPlan(ctx context.Context, tenantID, planID uuid.UUID) (domain.Ve
 	return plan, err
 }
 
+// ErrEnvironmentMismatch reports that the execution environment fingerprint
+// differs from the fingerprint the plan was created for (LLD 9.4). A selective
+// run must never start in that state: the plan is invalidated and the
+// authoritative full-suite fallback is required instead.
+var ErrEnvironmentMismatch = errors.New("execution environment fingerprint differs from the plan fingerprint")
+
 func (d *DB) StartExecution(ctx context.Context, tenantID, executorID uuid.UUID, planID uuid.UUID, idempotencyKey, worktreeHash, environmentDigest string, fullSuite bool, now time.Time) (domain.Execution, error) {
 	result := domain.Execution{ID: uuid.New(), PlanID: planID, StartedAt: now, EnvironmentFingerprint: environmentDigest}
+	environmentMismatch := false
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		var status domain.PlanStatus
 		var mode domain.PlanMode
 		var expires time.Time
 		var expectedWorktree string
-		if err := tx.QueryRow(ctx, `SELECT status,mode,expires_at,worktree_hash FROM verification_plans WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, planID).Scan(&status, &mode, &expires, &expectedWorktree); err != nil {
+		var planJSON []byte
+		if err := tx.QueryRow(ctx, `SELECT status,mode,expires_at,worktree_hash,explanation_json FROM verification_plans WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, planID).Scan(&status, &mode, &expires, &expectedWorktree, &planJSON); err != nil {
 			return err
 		}
 		if expectedWorktree != worktreeHash || !expires.After(now) {
@@ -147,6 +155,27 @@ func (d *DB) StartExecution(ctx context.Context, tenantID, executorID uuid.UUID,
 		if mode == domain.ModeFull && !fullSuite {
 			return errors.New("FULL mode requires a full-suite execution")
 		}
+		// LLD 9.4: a selective run is invalidated when the execution
+		// environment fingerprint differs from the plan fingerprint. The plan
+		// is downgraded to FULL_REQUIRED so that only the authoritative
+		// full-suite fallback can still run; the selective subset is never
+		// executed in a different environment than the one it was planned
+		// for.
+		if !fullSuite {
+			var planEnv struct {
+				EnvironmentFingerprint string `json:"environment_fingerprint"`
+			}
+			if err := json.Unmarshal(planJSON, &planEnv); err != nil {
+				return err
+			}
+			if planEnv.EnvironmentFingerprint != "" && environmentDigest != "" && planEnv.EnvironmentFingerprint != environmentDigest {
+				if _, err := tx.Exec(ctx, `UPDATE verification_plans SET status=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, planID, domain.PlanFullRequired); err != nil {
+					return err
+				}
+				environmentMismatch = true
+				return nil
+			}
+		}
 		metadata, _ := json.Marshal(map[string]bool{"full_suite": fullSuite})
 		_, err := tx.Exec(ctx, `INSERT INTO executions(id,tenant_id,plan_id,idempotency_key,status,executor_id,environment_digest,started_at,summary_json) VALUES($1,$2,$3,$4,'RUNNING',$5,$6,$7,$8)`, result.ID, tenantID, planID, idempotencyKey, executorID, environmentDigest, now, metadata)
 		if err != nil {
@@ -155,7 +184,13 @@ func (d *DB) StartExecution(ctx context.Context, tenantID, executorID uuid.UUID,
 		_, err = tx.Exec(ctx, `UPDATE verification_plans SET status=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, planID, domain.PlanExecuting)
 		return err
 	})
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	if environmentMismatch {
+		return result, ErrEnvironmentMismatch
+	}
+	return result, nil
 }
 
 type UnitResult struct {
@@ -166,15 +201,20 @@ type UnitResult struct {
 	FailureFingerprint string          `json:"failure_fingerprint,omitempty"`
 	ReportHash         string          `json:"report_hash,omitempty"`
 	Summary            json.RawMessage `json:"summary,omitempty"`
+	// SupersededStatus and CorrectionReason are set when a superseding
+	// correction (LLD 12.4) replaced the recorded status: the original status
+	// stays visible together with the audit reason.
+	SupersededStatus string `json:"superseded_status,omitempty"`
+	CorrectionReason string `json:"correction_reason,omitempty"`
 }
 type ResultSubmission struct {
-	Outcome       domain.ExecutionOutcome `json:"outcome"`
-	ExitCode      *int                    `json:"exit_code,omitempty"`
-	CompletedAt   time.Time               `json:"completed_at"`
-	ElapsedMillis int64                   `json:"elapsed_ms"`
-	ComputeMillis int64                   `json:"compute_ms"`
-	Summary       json.RawMessage         `json:"summary,omitempty"`
-	UnitResults   []UnitResult            `json:"unit_results,omitempty"`
+	Outcome       domain.ExecutionOutcome      `json:"outcome"`
+	ExitCode      *int                         `json:"exit_code,omitempty"`
+	CompletedAt   time.Time                    `json:"completed_at"`
+	ElapsedMillis int64                        `json:"elapsed_ms"`
+	ComputeMillis int64                        `json:"compute_ms"`
+	Summary       json.RawMessage              `json:"summary,omitempty"`
+	UnitResults   []UnitResult                 `json:"unit_results,omitempty"`
 	Coverage      []domain.CoverageObservation `json:"coverage,omitempty"`
 }
 
@@ -233,23 +273,26 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 			}
 		}
 		unitIDs := make(map[string]uuid.UUID, len(allowed))
+		unitAdapters := make(map[string]string, len(allowed))
 		if len(result.Coverage) > 0 && len(allowed) > 0 {
 			allowedKeys := make([]string, 0, len(allowed))
 			for key := range allowed {
 				allowedKeys = append(allowedKeys, key)
 			}
-			rows, err := tx.Query(ctx, `SELECT id,stable_key FROM test_units WHERE snapshot_id=$1 AND stable_key=ANY($2)`, plan.SnapshotID, allowedKeys)
+			rows, err := tx.Query(ctx, `SELECT id,stable_key,adapter FROM test_units WHERE snapshot_id=$1 AND stable_key=ANY($2)`, plan.SnapshotID, allowedKeys)
 			if err != nil {
 				return err
 			}
 			for rows.Next() {
 				var id uuid.UUID
 				var key string
-				if err := rows.Scan(&id, &key); err != nil {
+				var adapter string
+				if err := rows.Scan(&id, &key, &adapter); err != nil {
 					rows.Close()
 					return err
 				}
 				unitIDs[key] = id
+				unitAdapters[key] = adapter
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()
@@ -371,9 +414,9 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 				return err
 			}
 		}
-		var snapshotBuildDigest, snapshotTestConfigDigest string
+		var snapshotBuildDigest, snapshotTestConfigDigest, snapshotDependencyDigest string
 		if len(result.Coverage) > 0 {
-			if err := tx.QueryRow(ctx, `SELECT config_digest,test_config_digest FROM repository_snapshots WHERE tenant_id=$1 AND id=$2`, tenantID, plan.SnapshotID).Scan(&snapshotBuildDigest, &snapshotTestConfigDigest); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT config_digest,test_config_digest,dependency_digest FROM repository_snapshots WHERE tenant_id=$1 AND id=$2`, tenantID, plan.SnapshotID).Scan(&snapshotBuildDigest, &snapshotTestConfigDigest, &snapshotDependencyDigest); err != nil {
 				return err
 			}
 		}
@@ -387,6 +430,25 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 			if observation.RunID != executionID || observation.EnvironmentFingerprint != executionEnvironment || observation.BuildConfigDigest != snapshotBuildDigest || observation.TestConfigDigest != snapshotTestConfigDigest || observation.ObservedAt.Before(executionStartedAt) || observation.ObservedAt.After(result.CompletedAt.Add(5*time.Minute)) {
 				return errors.New("coverage provenance does not match the completed execution")
 			}
+			// The dependency version of the coverage report is part of its
+			// provenance (LLD 23). A report that claims a different dependency
+			// version than the executed snapshot is rejected; a report that
+			// does not state one inherits the executed snapshot's dependency
+			// version, because the run executed exactly that tree.
+			dependencyDigest := observation.DependencyDigest
+			if dependencyDigest != "" && snapshotDependencyDigest != "" && dependencyDigest != snapshotDependencyDigest {
+				return errors.New("coverage provenance does not match the executed dependency version")
+			}
+			if dependencyDigest == "" {
+				dependencyDigest = snapshotDependencyDigest
+			}
+			// The adapter version that produced the report is the version
+			// recorded for the plan's adapter scope (LLD 18.4). It is the
+			// provenance later compared against the version in effect.
+			adapterVersion := observation.AdapterVersion
+			if adapterVersion == "" {
+				adapterVersion = plan.AdapterCapabilities[unitAdapters[observation.TestUnitKey]]
+			}
 			unitID, ok := unitIDs[observation.TestUnitKey]
 			if !ok {
 				return fmt.Errorf("coverage references an unknown test unit: %s", observation.TestUnitKey)
@@ -399,11 +461,14 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 			} else if err := tx.QueryRow(ctx, `SELECT id FROM graph_nodes WHERE snapshot_id=$1 AND path=$2 AND node_type='SOURCE_FILE' ORDER BY stable_key LIMIT 1`, plan.SnapshotID, observation.CoveredPath).Scan(&nodeID); err != nil {
 				return fmt.Errorf("coverage references unknown source path %q: %w", observation.CoveredPath, err)
 			}
-			if !observation.SuiteLevel || observation.TestSpecific {
-				return errors.New("aggregate adapter coverage must remain suite-level until per-test contexts are available")
+			if observation.TestSpecific && observation.SuiteLevel {
+				return errors.New("coverage cannot be both test-specific and suite-level")
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO coverage_observations(tenant_id,snapshot_id,test_unit_id,covered_node_id,precision,source,report_hash,run_id,environment_digest,build_config_digest,test_config_digest,line_start,line_end,suite_level,test_specific,evidence_confidence,observed_at)
-				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, tenantID, plan.SnapshotID, unitID, nodeID, observation.Precision, observation.SourceType, observation.ReportHash, executionID.String(), observation.EnvironmentFingerprint, observation.BuildConfigDigest, observation.TestConfigDigest, observation.LineStart, observation.LineEnd, observation.SuiteLevel, observation.TestSpecific, observation.EvidenceConfidence, observation.ObservedAt); err != nil {
+			if !observation.TestSpecific && !observation.SuiteLevel {
+				return errors.New("coverage precision must identify test-specific or suite-level evidence")
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO coverage_observations(tenant_id,snapshot_id,test_unit_id,covered_node_id,precision,source,report_hash,run_id,environment_digest,build_config_digest,test_config_digest,dependency_digest,adapter_version,line_start,line_end,suite_level,test_specific,evidence_confidence,observed_at)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, tenantID, plan.SnapshotID, unitID, nodeID, observation.Precision, observation.SourceType, observation.ReportHash, executionID.String(), observation.EnvironmentFingerprint, observation.BuildConfigDigest, observation.TestConfigDigest, dependencyDigest, adapterVersion, observation.LineStart, observation.LineEnd, observation.SuiteLevel, observation.TestSpecific, observation.EvidenceConfidence, observation.ObservedAt); err != nil {
 				return err
 			}
 		}
@@ -428,6 +493,14 @@ func (d *DB) SubmitExecutionResult(ctx context.Context, tenantID, executionID uu
 		}
 		commandStatus := "COMPLETED"
 		planStatus := domain.PlanPassed
+		// LLD 9.4: a selective result produced in an environment that differs
+		// from the plan fingerprint is not comparable with the planned
+		// evidence. It is never recorded as a targeted pass or failure: the
+		// execution is stale and the authoritative full suite must decide.
+		if plan.EnvironmentFingerprint != "" && executionEnvironment != "" && plan.EnvironmentFingerprint != executionEnvironment &&
+			(result.Outcome == domain.OutcomeTargetedPass || result.Outcome == domain.OutcomeTargetedFail) {
+			result.Outcome = domain.OutcomeStale
+		}
 		if result.Outcome == domain.OutcomeTargetedFail || result.Outcome == domain.OutcomeFullVerificationFail {
 			planStatus = domain.PlanFailed
 		}

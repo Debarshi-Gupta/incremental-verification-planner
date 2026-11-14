@@ -32,10 +32,50 @@ type Backend struct {
 	Metrics *telemetry.Metrics
 	Audit   audit.Service
 	Now     func() time.Time
+	// Upgrades records the algorithm and policy versions a repository was
+	// calibrated against so that a major change can reset the CI selective
+	// eligibility to OBSERVE (LLD 18.4). It defaults to the database and can
+	// be replaced in tests.
+	Upgrades upgradeStateStore
+}
+
+// upgradeStateStore is the persistence contract for the LLD 18.4 upgrade and
+// re-calibration state.
+type upgradeStateStore interface {
+	ObserveUpgrade(ctx context.Context, tenantID, repositoryID uuid.UUID, algorithmVersion string, policyVersion int64, calibrationRuns, auditRuns int, now time.Time) (domain.UpgradeState, error)
 }
 
 func NewBackend(db *persistence.DB, metrics *telemetry.Metrics) *Backend {
-	return &Backend{DB: db, Metrics: metrics, Audit: audit.Service{Store: db, Metrics: metrics, QuarantineDuration: 7 * 24 * time.Hour}, Now: time.Now}
+	backend := &Backend{DB: db, Metrics: metrics, Audit: audit.Service{QuarantineDuration: 7 * 24 * time.Hour}, Now: time.Now}
+	// The audit service stores its recorder and its metrics in interface
+	// fields. A typed nil pointer stored in an interface is not equal to nil,
+	// so the nil guards inside the audit service would pass and the first
+	// call would dereference a nil pointer. The interface fields are only
+	// populated with real implementations.
+	if db != nil {
+		backend.Audit.Store = db
+	}
+	if metrics != nil {
+		backend.Audit.Metrics = metrics
+	}
+	if db != nil {
+		backend.Upgrades = db
+	}
+	return backend
+}
+
+// upgradeStore returns the configured upgrade state store.
+func (b *Backend) upgradeStore() upgradeStateStore {
+	if b == nil {
+		return nil
+	}
+	if b.Upgrades != nil {
+		return b.Upgrades
+	}
+	if b.DB != nil {
+		return b.DB
+	}
+	return nil
 }
 
 func (b *Backend) Ready(ctx context.Context) error {
@@ -118,6 +158,13 @@ func (b *Backend) Execute(ctx context.Context, action api.Action) (any, int, err
 		planID, _ := uuid.Parse(action.ResourceID)
 		execution, err := b.DB.StartExecution(ctx, tenant, actor, planID, action.IdempotencyKey, v.WorktreeHash, v.EnvironmentDigest, v.FullSuite, now)
 		if err != nil {
+			if errors.Is(err, persistence.ErrEnvironmentMismatch) {
+				// LLD 9.4: the selective run is invalidated because the
+				// execution environment fingerprint differs from the plan
+				// fingerprint. The plan was downgraded to FULL_REQUIRED, so
+				// only the authoritative full-suite fallback may run.
+				return nil, 0, apiErr(http.StatusConflict, "ENVIRONMENT_MISMATCH", "execution environment fingerprint differs from the plan fingerprint; the selective plan was invalidated and the full-suite fallback is required", false)
+			}
 			return nil, 0, storageError(err)
 		}
 		return execution, http.StatusCreated, nil
@@ -153,6 +200,25 @@ func (b *Backend) Execute(ctx context.Context, action api.Action) (any, int, err
 		if err != nil {
 			return nil, 0, storageError(err)
 		}
+		// LLD 10.6: the calibration metric set and the LLD 10.2
+		// scheduled-audit state belong to the same calibrated metrics
+		// response, so a dashboard reads them from one place.
+		policy, _, _, err := b.effectivePolicy(ctx, tenant, repoID)
+		if err != nil {
+			return nil, 0, storageError(err)
+		}
+		calibration, breakdowns, err := b.calibrationMetrics(ctx, tenant, repoID)
+		if err != nil {
+			return nil, 0, storageError(err)
+		}
+		schedule, err := b.scheduledAuditState(ctx, tenant, repoID, policy, now)
+		if err != nil {
+			return nil, 0, storageError(err)
+		}
+		metrics.CalibrationMetrics = calibration
+		metrics.CalibrationBreakdowns = breakdowns
+		metrics.ScheduledAudit = schedule
+		b.recordAuditMissAge(ctx, tenant, policy, now)
 		return metrics, http.StatusOK, nil
 	case "accepted_changes.submit":
 		v := action.Payload.(api.AcceptedChangeRequest)
@@ -214,9 +280,11 @@ func (b *Backend) getPolicy(ctx context.Context, tenant, repo uuid.UUID) (any, i
 			return nil, 0, apiErr(http.StatusInternalServerError, "POLICY_INVALID", "stored policy could not be decoded", false)
 		}
 		policy.Version = version
+		normalizeEvidenceGates(&policy)
 		if err := b.setObservedCalibration(ctx, tenant, repo, &policy); err != nil {
 			return nil, 0, storageError(err)
 		}
+		b.applyUpgradeEligibility(ctx, tenant, repo, &policy)
 		data, err := json.Marshal(policy)
 		if err != nil {
 			return nil, 0, apiErr(http.StatusInternalServerError, "POLICY_INVALID", "effective policy could not be encoded", false)
@@ -234,11 +302,37 @@ func (b *Backend) getPolicy(ctx context.Context, tenant, repo uuid.UUID) (any, i
 	if err := b.setObservedCalibration(ctx, tenant, repo, &policy); err != nil {
 		return nil, 0, storageError(err)
 	}
+	b.applyUpgradeEligibility(ctx, tenant, repo, &policy)
 	data, _ := json.Marshal(policy)
-	hash, _ := security.CanonicalJSONHash(data)
+	hash, _ = security.CanonicalJSONHash(data)
 	response := signedPolicyResponse(repo, json.RawMessage(data), 1, hash)
 	response["source"] = "builtin-conservative"
 	return response, http.StatusOK, nil
+}
+
+// applyUpgradeEligibility records the observed algorithm and policy versions
+// and reports whether CI selective gating may be used for the repository
+// (LLD 18.4). A major change resets the eligibility until the repository is
+// re-calibrated.
+func (b *Backend) applyUpgradeEligibility(ctx context.Context, tenant, repo uuid.UUID, policy *domain.Policy) {
+	if policy == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if b.Now != nil {
+		now = b.Now().UTC()
+	}
+	state, err := b.observeUpgrade(ctx, tenant, repo, *policy, now)
+	if err != nil {
+		// A repository whose upgrade state cannot be recorded never keeps CI
+		// selective eligibility: the reset state stays unknown.
+		policy.CISelectiveEligible = false
+		policy.CISelectiveResetReason = "the algorithm and policy upgrade state could not be recorded"
+		return
+	}
+	reason := state.ResetReason(policy.ObservedCalibrationRuns, policy.ObservedAuditRuns, *policy)
+	policy.CISelectiveEligible = reason == ""
+	policy.CISelectiveResetReason = reason
 }
 
 func (b *Backend) setObservedCalibration(ctx context.Context, tenant, repo uuid.UUID, policy *domain.Policy) error {
@@ -249,6 +343,18 @@ func (b *Backend) setObservedCalibration(ctx context.Context, tenant, repo uuid.
 	policy.ObservedCalibrationRuns = int(executions)
 	policy.ObservedAuditRuns = int(audits)
 	return nil
+}
+
+// observeUpgrade records the algorithm and policy versions observed for a
+// repository and returns the resulting upgrade state. A major algorithm or
+// policy change resets the CI selective eligibility to OBSERVE until the
+// repository is re-calibrated (LLD 18.4).
+func (b *Backend) observeUpgrade(ctx context.Context, tenant, repo uuid.UUID, policy domain.Policy, now time.Time) (domain.UpgradeState, error) {
+	store := b.upgradeStore()
+	if store == nil {
+		return domain.UpgradeState{}, nil
+	}
+	return store.ObserveUpgrade(ctx, tenant, repo, analysis.AlgorithmVersion, policy.Version, policy.ObservedCalibrationRuns, policy.ObservedAuditRuns, now)
 }
 
 func signedPolicyResponse(repositoryID uuid.UUID, policy json.RawMessage, version int64, policyHash string) map[string]any {
@@ -323,7 +429,7 @@ func (b *Backend) createPlan(ctx context.Context, tenant, repoID uuid.UUID, v ap
 	if err != nil {
 		return nil, 0, storageError(err)
 	}
-	bundle.TestUnits, err = b.DB.ApplyTestHistory(ctx, tenant, repoID, v.ExecutionContext.ToolchainDigest, bundle.Snapshot.TestConfigDigest, policy.HistoryWindow, bundle.TestUnits)
+	bundle.TestUnits, err = b.DB.ApplyTestHistory(ctx, tenant, repoID, v.ExecutionContext.ToolchainDigest, bundle.Snapshot.TestConfigDigest, policy.HistoryWindow, policy.FlakeMinimumComparableObservations, bundle.TestUnits)
 	if err != nil {
 		return nil, 0, storageError(err)
 	}
@@ -336,6 +442,13 @@ func (b *Backend) createPlan(ctx context.Context, tenant, repoID uuid.UUID, v ap
 		return nil, 0, storageError(err)
 	}
 	bundle.Coverage = append(bundle.Coverage, coverageHistory...)
+	// Evidence comparability gates (LLD 18.4 and LLD 23 scenario 6): coverage
+	// that belongs to a previous dependency version or to an adapter version
+	// that is no longer comparable is removed from the planner input and
+	// escalates the plan.
+	gate := applyEvidenceGates(bundle.Snapshot, bundle.TestUnits, bundle.Coverage, v.ClientCapabilities.AdapterVersions)
+	bundle.TestUnits = gate.Units
+	bundle.Coverage = gate.Coverage
 	if len(v.ChangedFiles) == 0 {
 		return nil, 0, apiErr(400, "CHANGE_SET_REQUIRED", "normalized changed-file metadata is required", false)
 	}
@@ -362,19 +475,69 @@ func (b *Backend) createPlan(ctx context.Context, tenant, repoID uuid.UUID, v ap
 		policy.Quarantined = true
 		policy.QuarantineScope = q
 	}
-	evidence := analysis.EvidenceSnapshot{Snapshot: bundle.Snapshot, ChangedFiles: v.ChangedFiles, Nodes: bundle.Nodes, Edges: bundle.Edges, Coverage: bundle.Coverage, Units: bundle.TestUnits,
+	// LLD 18.4: a major algorithm or policy change resets the CI selective
+	// eligibility to OBSERVE until the repository is re-calibrated.
+	upgradeState, err := b.observeUpgrade(ctx, tenant, repoID, policy, now)
+	if err != nil {
+		return nil, 0, storageError(err)
+	}
+	effectiveMode, resetReason := effectivePlanMode(v.Mode, upgradeState, policy)
+	// LLD 10.2: every repository must run full verification at least once per
+	// configured cadence, even when no random audit was sampled. When the
+	// scheduled audit is due the plan is a full verification.
+	if effectiveMode != domain.ModeFull && policy.AuditSchedule.Cadence > 0 {
+		due, dueErr := b.scheduledAuditDue(ctx, tenant, repoID, policy, now)
+		if dueErr != nil {
+			return nil, 0, storageError(dueErr)
+		}
+		if due {
+			effectiveMode = domain.ModeFull
+			if resetReason == "" {
+				resetReason = "scheduled audit cadence reached"
+			} else {
+				resetReason += "; scheduled audit cadence reached"
+			}
+		}
+	}
+	// Conflicting edges are retained and marked, never merged or dropped
+	// (LLD line 204, ADR 0013). Marking runs on a copy of the loaded edges so
+	// the stored bundle is never mutated, and it applies to every plan
+	// regardless of the client that produced the snapshot.
+	planEdges := append([]domain.GraphEdge(nil), bundle.Edges...)
+	analysis.MarkConflictingEdges(planEdges)
+	evidence := analysis.EvidenceSnapshot{Snapshot: bundle.Snapshot, ChangedFiles: v.ChangedFiles, Nodes: bundle.Nodes, Edges: planEdges, Coverage: bundle.Coverage, Units: bundle.TestUnits,
 		GraphComplete: bundle.Snapshot.IsComplete, GraphMissingEdges: !bundle.Snapshot.IsComplete, DiscoveryReliable: bundle.Snapshot.IsComplete,
 		CoverageExpected: len(bundle.Coverage) > 0, PolicyTrusted: true, ToolchainComparable: v.ExecutionContext.ToolchainDigest != "" && v.ExecutionContext.ToolchainDigest == bundle.Snapshot.ToolchainDigest,
 		CapturedAt: now, AdapterCapabilityVersions: capabilities}
-	request := domain.PlanRequest{RepositoryID: repoID, SnapshotID: snapshotID, BaseSHA: v.BaseSHA, HeadSHA: v.HeadSHA, CurrentWorktreeHash: v.WorktreeHash, Mode: v.Mode, Now: now,
+	request := domain.PlanRequest{RepositoryID: repoID, SnapshotID: snapshotID, BaseSHA: v.BaseSHA, HeadSHA: v.HeadSHA, CurrentWorktreeHash: v.WorktreeHash, Mode: effectiveMode, Now: now,
 		AdapterID: adapter, AdapterSupported: knownAdapter[adapter] && !strings.EqualFold(v.ClientCapabilities.OS, "windows"), AdapterDiscoveryOK: bundle.Snapshot.IsComplete,
 		AdapterCapabilities: capabilities, EnvironmentFingerprint: v.ExecutionContext.ToolchainDigest, PolicyVersion: policyVersion, PlanTTL: 15 * time.Minute, PolicySnapshotTrusted: true}
 	for _, unit := range bundle.TestUnits {
-		request.FullSuiteEstimateMillis += unit.EstimatedMillis
+		// The full-suite estimate uses the same cost basis as the planner's
+		// selection cost (the minimum cost floor), so the economic comparison
+		// compares like with like instead of a floored selection against a raw
+		// estimate.
+		estimate := unit.EstimatedMillis
+		if estimate < policy.MinimumCostFloorMillis {
+			estimate = policy.MinimumCostFloorMillis
+		}
+		request.FullSuiteEstimateMillis += estimate
 	}
 	plan, err := analysis.CreatePlan(request, evidence, policy)
 	if err != nil {
 		return nil, 0, apiErr(422, "PLAN_INVALID", "planner could not safely create a plan", false)
+	}
+	// The plan records the environment fingerprint it was planned for so that
+	// the execution can be compared against it (LLD 9.4).
+	plan.EnvironmentFingerprint = v.ExecutionContext.ToolchainDigest
+	if gate.invalidated() {
+		escalateInvalidatedEvidence(&plan, policy, gate.Escalations)
+	}
+	// Stale coverage is marked and excluded; the plan escalates only when the
+	// remaining evidence cannot meet the coverage thresholds (LLD 6.3 rule 6).
+	recordInvalidatedCoverage(&plan, gate.CoverageInvalidations)
+	if resetReason != "" {
+		plan.Explanation += " CI selective eligibility was reset to OBSERVE after a major algorithm or policy change and is not re-calibrated yet: " + resetReason
 	}
 	if err := b.DB.SavePlan(ctx, tenant, plan); err != nil {
 		return nil, 0, storageError(err)
@@ -443,6 +606,17 @@ func (b *Backend) recordExecutionMetrics(ctx context.Context, tenantID, executio
 	}
 }
 
+// normalizeEvidenceGates applies the product default to stored policies that
+// predate an evidence-gate field and therefore decode as its Go zero value
+// (LLD 7.3). Without this, a legacy policy would carry a minimum of 0 and the
+// gates would either disable themselves or, failing closed, silence every
+// flake-rate claim until the policy is rewritten.
+func normalizeEvidenceGates(policy *domain.Policy) {
+	if policy.FlakeMinimumComparableObservations < 1 {
+		policy.FlakeMinimumComparableObservations = config.Defaults().Analysis.FlakeMinimumComparableObservations
+	}
+}
+
 func (b *Backend) effectivePolicy(ctx context.Context, tenant, repo uuid.UUID) (domain.Policy, int64, string, error) {
 	raw, version, hash, err := b.DB.ActivePolicy(ctx, tenant, repo)
 	if err == nil {
@@ -451,6 +625,7 @@ func (b *Backend) effectivePolicy(ctx context.Context, tenant, repo uuid.UUID) (
 			return policy, 0, "", e
 		}
 		policy.Version = version
+		normalizeEvidenceGates(&policy)
 		policy.PolicyAvailable = true
 		if err := b.setObservedCalibration(ctx, tenant, repo, &policy); err != nil {
 			return domain.Policy{}, 0, "", err
@@ -485,8 +660,13 @@ func (b *Backend) submitAudit(ctx context.Context, tenant, repo uuid.UUID, a api
 	if err != nil {
 		return nil, 0, storageError(err)
 	}
+	policy, _, _, err := b.effectivePolicy(ctx, tenant, repo)
+	if err != nil {
+		return nil, 0, storageError(err)
+	}
 	in := audit.Input{TenantID: tenant, RepositoryID: repo, PlanID: plan.ID, SelectedExecutionID: selected.ID, FullExecutionID: fullID, Adapter: v.Adapter, RuleScope: v.RuleScope,
-		SelectedOutcome: v.SelectedOutcome, FullOutcome: v.FullOutcome, SelectedKeys: v.SelectedKeys, Failures: v.Failures, SelectedFingerprint: v.SelectedFingerprint, FullFingerprint: v.FullFingerprint, FailureOutputHash: v.FailureOutputHash, Now: now}
+		SelectedOutcome: v.SelectedOutcome, FullOutcome: v.FullOutcome, SelectedKeys: v.SelectedKeys, Failures: v.Failures, SelectedFingerprint: v.SelectedFingerprint, FullFingerprint: v.FullFingerprint, FailureOutputHash: v.FailureOutputHash, Now: now,
+		FlakeMinimumComparableObservations: policy.FlakeMinimumComparableObservations}
 	result, err := b.Audit.Process(ctx, in)
 	if err != nil {
 		return nil, 0, storageError(err)
@@ -494,10 +674,15 @@ func (b *Backend) submitAudit(ctx context.Context, tenant, repo uuid.UUID, a api
 	return result, http.StatusCreated, nil
 }
 
+// quarantined reports whether a selection scope is under an active quarantine.
+// Expiry alone never deactivates a quarantine: LLD 7.2/10.5 require maintainer
+// acknowledgement plus a clean comparable audit before selective gating may
+// resume, so a quarantine stays effective until an explicit clear transition
+// (expiry only makes the quarantine *clearable*).
 func (b *Backend) quarantined(ctx context.Context, tenant, repo uuid.UUID, adapter string) (string, bool) {
 	var scope string
 	err := b.DB.TenantTx(ctx, tenant.String(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT scope_key FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND status IN ('QUARANTINED','ACKNOWLEDGED') AND (expires_at IS NULL OR expires_at>now()) AND (scope_key=$3 OR scope_key LIKE $4 OR scope_key='all/all') ORDER BY created_at DESC LIMIT 1`, tenant, repo, adapter+"/all", adapter+"/%").Scan(&scope)
+		return tx.QueryRow(ctx, `SELECT scope_key FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND status IN ('QUARANTINED','ACKNOWLEDGED') AND (scope_key=$3 OR scope_key LIKE $4 OR scope_key='all/all') ORDER BY created_at DESC LIMIT 1`, tenant, repo, adapter+"/all", adapter+"/%").Scan(&scope)
 	})
 	return scope, err == nil
 }

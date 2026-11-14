@@ -1,0 +1,4 @@
+# The golden corpus is compared byte-for-byte with generateCorpus() output
+# (LF-terminated JSONL). Disable EOL conversion so the guard survives checkout
+# with core.autocrlf enabled.
+corpus.jsonl -text

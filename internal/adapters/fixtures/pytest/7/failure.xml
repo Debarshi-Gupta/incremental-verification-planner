@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2" time="0.048" timestamp="2026-09-20T09:14:02.118453" hostname="ci-runner-07">
+    <testcase classname="tests/test_api" file="tests/test_api.py" line="12" name="test_reads_health" time="0.003"/>
+    <testcase classname="tests/test_api" file="tests/test_api.py" line="24" name="test_post_user[admin user]" time="0.007">
+      <failure message="assert 201 == 400" type="AssertionError">assert 201 == 400
+  where 201 = response.status_code
+  and   400 = expected_status
+</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

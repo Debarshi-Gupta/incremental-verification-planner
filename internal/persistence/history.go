@@ -11,8 +11,12 @@ import (
 
 // ApplyTestHistory overlays comparable execution history onto the immutable
 // snapshot units. Historical p95 duration is used as a conservative planning
-// estimate; unrelated environment results are excluded.
-func (d *DB) ApplyTestHistory(ctx context.Context, tenantID, repositoryID uuid.UUID, environment, testConfigDigest string, window time.Duration, units []domain.TestUnit) ([]domain.TestUnit, error) {
+// estimate; unrelated environment results are excluded. The flake rate is only
+// computed once the window carries at least flakeMinimumObservations
+// comparable samples (LLD 7.3); below that it stays 0 — no flakiness claim
+// from insufficient evidence. Duration aggregates are a separate concern and
+// are populated regardless of sample count (LLD line 226).
+func (d *DB) ApplyTestHistory(ctx context.Context, tenantID, repositoryID uuid.UUID, environment, testConfigDigest string, window time.Duration, flakeMinimumObservations int, units []domain.TestUnit) ([]domain.TestUnit, error) {
 	result := append([]domain.TestUnit(nil), units...)
 	if environment == "" || testConfigDigest == "" || window <= 0 || len(result) == 0 {
 		return result, nil
@@ -54,7 +58,7 @@ func (d *DB) ApplyTestHistory(ctx context.Context, tenantID, repositoryID uuid.U
 			unit.DurationP95Millis = p95
 			unit.DurationSampleCount = int(samples)
 			unit.HistoricalFailures = int(failures)
-			unit.FlakeRate = float64(flaky) / float64(samples)
+			unit.FlakeRate = flakeRate(flaky, samples, flakeMinimumObservations)
 			if p95 > unit.EstimatedMillis {
 				unit.EstimatedMillis = p95
 			}
@@ -62,4 +66,18 @@ func (d *DB) ApplyTestHistory(ctx context.Context, tenantID, repositoryID uuid.U
 		return rows.Err()
 	})
 	return result, err
+}
+
+// flakeRate gates flake-rate computation on a minimum number of comparable
+// observations (LLD 7.3). Below the minimum — or with a non-positive minimum,
+// which config validation forbids and which must never silently disable the
+// gate — it reports 0: "no classified flaky evidence", never a claim of
+// flakiness or of cleanliness drawn from insufficient data. It is pure so the
+// gate is unit-testable without a database; duration aggregates in
+// ApplyTestHistory are not gated here.
+func flakeRate(flaky, samples int64, flakeMinimumObservations int) float64 {
+	if flakeMinimumObservations < 1 || samples < int64(flakeMinimumObservations) {
+		return 0
+	}
+	return float64(flaky) / float64(samples)
 }

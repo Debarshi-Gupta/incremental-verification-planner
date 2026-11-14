@@ -126,3 +126,30 @@ groups:
         annotations:
           summary: "IVP scrape target is unavailable"
           description: "Prometheus cannot scrape an IVP target for at least two minutes."
+
+      - alert: IVPDatabaseUnavailable
+        expr: min by (namespace, pod) (kube_pod_status_ready{condition="true", pod=~".*ivp-api.*"} == 0) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IVP cannot reach its database"
+          description: "The IVP API readiness probe has been failing for five minutes. The probe reports database reachability, so the database is unavailable or the migration has not completed."
+
+      - alert: IVPAuditMissUnacknowledgedSLA
+        expr: ivp_audit_miss_unacknowledged_sla_breaches > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An audit miss is unacknowledged past the response SLA"
+          description: "At least one audit miss has been unacknowledged longer than the configured response SLA (safety.audit.acknowledgement_sla_hours). Acknowledge or remediate the affected scope."
+
+      - alert: IVPCrossTenantViolation
+        expr: sum(increase(ivp_cross_tenant_violations_total[10m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A cross-tenant authorization attempt was observed"
+          description: "A request explicitly targeted another tenant's resources. The supplied tenant is always ignored, but the attempt is a security event and must be investigated."

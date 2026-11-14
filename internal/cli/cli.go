@@ -31,7 +31,14 @@ type exitError struct {
 
 func (e exitError) Error() string { return e.err.Error() }
 func (e exitError) Unwrap() error { return e.err }
+
+// ExitCode maps an error to the documented CLI exit code (LLD 11.2). A nil
+// error is a success (code 0); an error without an explicit code is an
+// infrastructure error (code 6).
 func ExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
 	var e exitError
 	if errors.As(err, &e) {
 		return e.code
@@ -383,7 +390,7 @@ func (c *commands) auditCommand() *cobra.Command {
 	cmd.Flags().String("full-run", "", "completed full-suite report file or execution UUID; omit to run the saved plan as full-suite")
 	cmd.Flags().String("adapter", "", "adapter scope (defaults to the selected plan's adapter or all)")
 	cmd.Flags().String("rule-scope", "all", "rule scope to quarantine on a possible or confirmed miss")
-	cmd.Flags().Bool("sample", false, "apply safety.audit.sample_rate when --run latest is used")
+	cmd.Flags().Bool("sample", false, "apply the audit sampling rate (--run latest only): modes.risk_based_ci.audit_sample_rate for RISK_BASED_CI plans, safety.audit.sample_rate otherwise")
 	return cmd
 }
 

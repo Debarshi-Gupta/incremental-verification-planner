@@ -5,7 +5,10 @@ import (
 	"math"
 	"net/url"
 	"path"
+	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/ivp/ivp/internal/domain"
 )
@@ -27,6 +30,9 @@ func Validate(c Config) error {
 	if c.Analysis.MaxChangedFilesForSelectivePlan < 1 || c.Analysis.GraphStalenessMinutes < 1 || c.Analysis.CoverageStalenessDays < 1 || c.Analysis.HistoryWindowDays < 1 || c.Analysis.HistoryWindowDays > 3650 {
 		return invalid("analysis limits and staleness periods must be positive")
 	}
+	if c.Analysis.FlakeMinimumComparableObservations < 1 {
+		return invalid("analysis.flake_minimum_comparable_observations must be an integer of at least 1; flakiness is classified only after a minimum number of comparable observations (LLD 7.3)")
+	}
 	if !c.Analysis.RequireCleanDependencyResolution {
 		return invalid("analysis.require_clean_dependency_resolution must be true for selective planning")
 	}
@@ -45,8 +51,14 @@ func Validate(c Config) error {
 	if !validModes[c.Modes.Default] {
 		return invalid("modes.default is not a supported plan mode")
 	}
-	if math.IsNaN(c.Modes.RiskBasedCI.AuditSampleRate) || math.IsInf(c.Modes.RiskBasedCI.AuditSampleRate, 0) || c.Modes.RiskBasedCI.AuditSampleRate < 0 || c.Modes.RiskBasedCI.AuditSampleRate > 1 || c.Modes.RiskBasedCI.MinimumCalibrationRuns < 0 || c.Modes.RiskBasedCI.MinimumAuditRuns < 0 {
-		return invalid("risk_based_ci calibration and audit values are outside their valid range")
+	if !c.Modes.Observe.ExecuteFullSuite {
+		return invalid("modes.observe.execute_full_suite must be true; OBSERVE always runs the authoritative full suite")
+	}
+	if !c.Modes.FastFeedback.FinalCIFullSuiteRequired {
+		return invalid("modes.fast_feedback.final_ci_full_suite_required must be true; FAST_FEEDBACK never replaces the final CI full suite")
+	}
+	if math.IsNaN(c.Modes.RiskBasedCI.AuditSampleRate) || math.IsInf(c.Modes.RiskBasedCI.AuditSampleRate, 0) || c.Modes.RiskBasedCI.AuditSampleRate < 0 || c.Modes.RiskBasedCI.AuditSampleRate > 1 || c.Modes.RiskBasedCI.MinimumCalibrationRuns < 1 || c.Modes.RiskBasedCI.MinimumAuditRuns < 1 {
+		return invalid("risk_based_ci calibration and audit values are outside their valid range; calibration and audit minimums must be at least 1")
 	}
 	if c.Modes.RiskBasedCI.EnabledByOrganizationPolicy && c.Modes.Default != domain.ModeRiskBasedCI {
 		// It is valid for policy to permit the mode without choosing it as default.
@@ -80,8 +92,17 @@ func Validate(c Config) error {
 	if c.Selection.NonDeterministicTestAction != "INCLUDE_AND_LABEL" {
 		return invalid("non_deterministic_test_action must be INCLUDE_AND_LABEL")
 	}
-	if c.Safety.Audit.SampleRate < 0 || c.Safety.Audit.SampleRate > 1 || c.Safety.Audit.MinimumAuditsBeforeSelectiveCI < 0 || c.Safety.Audit.QuarantineHours < 1 || c.Safety.Audit.RepeatFailedTestCount < 1 {
-		return invalid("safety.audit values are outside their valid range")
+	if c.Safety.Audit.SampleRate < 0 || c.Safety.Audit.SampleRate > 1 || c.Safety.Audit.MinimumAuditsBeforeSelectiveCI < 1 || c.Safety.Audit.QuarantineHours < 1 || c.Safety.Audit.RepeatFailedTestCount < 1 {
+		return invalid("safety.audit values are outside their valid range; minimum_audits_before_selective_ci must be at least 1")
+	}
+	if c.Safety.Audit.ScheduledCadenceHours < 1 || c.Safety.Audit.ScheduledCadenceHours > 8760 {
+		return invalid("safety.audit.scheduled_cadence_hours must be between 1 and 8760 hours; the scheduled-audit cadence is a positive interval")
+	}
+	if c.Safety.Audit.AcknowledgementSLAHours < 1 || c.Safety.Audit.AcknowledgementSLAHours > 8760 {
+		return invalid("safety.audit.acknowledgement_sla_hours must be between 1 and 8760 hours; the audit response SLA is a positive interval")
+	}
+	if !c.Safety.Audit.QuarantineOnConfirmedMiss {
+		return invalid("safety.audit.quarantine_on_confirmed_miss must be true; a confirmed miss quarantines the affected scope")
 	}
 	if c.Execution.TimeoutSeconds < 1 || c.Execution.MaxOutputBytes < 1024 || c.Execution.MaxOutputBytes > 64<<20 {
 		return invalid("execution timeout and output bounds are invalid")
@@ -97,6 +118,9 @@ func Validate(c Config) error {
 	}
 	if c.Telemetry.MaxExcerptBytes < 0 || c.Telemetry.MaxExcerptBytes > 1<<20 || c.Telemetry.RetentionDays < 1 {
 		return invalid("telemetry excerpt and retention limits are invalid")
+	}
+	if c.Telemetry.CaptureRawStdout {
+		return invalid("telemetry.capture_raw_stdout must be false; raw stdout capture is not supported, only sanitized excerpts and hashes are retained")
 	}
 	for _, group := range [][]string{c.Safety.HardFullSuitePaths, c.Safety.CriticalPathPatterns, c.Safety.DocumentationPathPatterns} {
 		for _, pattern := range group {
@@ -114,6 +138,12 @@ func Validate(c Config) error {
 		if strings.TrimSpace(id) == "" {
 			return invalid("safety.always_run_check_ids contains an empty ID")
 		}
+	}
+	if err := validateReviewedExclusions(c.Safety.ReviewedExclusions); err != nil {
+		return err
+	}
+	if err := validateHardPathExceptions(c.Safety.HardPathExceptions); err != nil {
+		return err
 	}
 	if err := validateGeneric(c.Adapters.Generic); err != nil {
 		return err
@@ -142,6 +172,107 @@ func Validate(c Config) error {
 
 func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalidConfig, fmt.Sprintf(format, args...))
+}
+
+// Field patterns for reviewed exclusions. They are byte-identical to the
+// patterns published in schemas/ivp-config.schema.json so the schema and
+// config.Validate reach the same verdict on every value (ADR 0011).
+var (
+	reviewedFieldPattern = regexp.MustCompile(`^\S(?:.*\S)?$`)
+	reviewedAtPattern    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+)
+
+// validateReviewedExclusions enforces the reviewed-exclusion contract (ADR
+// 0013): every field is mandatory and trimmed, reviewed_at is a real calendar
+// date in UTC that is not in the future, and each unit key is reviewed at
+// most once. Calendar validity and the future-date rule are runtime-only
+// (the schema cannot express them); the trimmed-field and date-shape rules
+// mirror the published schema patterns exactly.
+func validateReviewedExclusions(entries []ReviewedExclusionConfig) error {
+	seen := make(map[string]bool, len(entries))
+	for i, entry := range entries {
+		for _, field := range []struct{ name, value string }{
+			{"unit_key", entry.UnitKey},
+			{"reviewer", entry.Reviewer},
+			{"rationale", entry.Rationale},
+		} {
+			if !reviewedFieldPattern.MatchString(field.value) {
+				return invalid("safety.reviewed_exclusions[%d].%s must be a single trimmed nonempty value", i, field.name)
+			}
+		}
+		if !reviewedAtPattern.MatchString(entry.ReviewedAt) {
+			return invalid("safety.reviewed_exclusions[%d].reviewed_at must be a calendar date in YYYY-MM-DD form", i)
+		}
+		date, err := time.Parse("2006-01-02", entry.ReviewedAt)
+		if err != nil || date.Format("2006-01-02") != entry.ReviewedAt {
+			return invalid("safety.reviewed_exclusions[%d].reviewed_at %q is not a real calendar date", i, entry.ReviewedAt)
+		}
+		if date.After(time.Now().UTC()) {
+			return invalid("safety.reviewed_exclusions[%d].reviewed_at %s is in the future", i, entry.ReviewedAt)
+		}
+		if seen[entry.UnitKey] {
+			return invalid("safety.reviewed_exclusions reviews unit key %q more than once", entry.UnitKey)
+		}
+		seen[entry.UnitKey] = true
+	}
+	return nil
+}
+
+// hardPathExceptionRules is the closed vocabulary of hard rules a narrow
+// exception may cover (ADR 0019 §1): the rule-3 path escalation codes. The
+// label-based rule-4 codes are absent by design — labels are never
+// exceptable — and CONFIG_OR_TOOLCHAIN_CHANGE is absent because the LLD's
+// reviewed exception attaches to the lockfile, migration, and schema-contract
+// clauses of rule 3 specifically (LLD 6.3 Stage 3 line 437).
+var hardPathExceptionRules = []string{
+	string(domain.EscLockfileChange),
+	string(domain.EscMigrationChange),
+	string(domain.EscPublicContractChange),
+}
+
+// validateHardPathExceptions enforces the narrow-exception contract (ADR
+// 0019): every field is mandatory and trimmed, path is a valid repository
+// glob, rule is one of the three rule-3 escalation codes, reviewed_at is a
+// real calendar date in UTC that is not in the future, and each path+rule
+// pair is reviewed at most once. Calendar validity and the future-date rule
+// are runtime-only (the schema cannot express them); the trimmed-field and
+// date-shape rules mirror the published schema patterns exactly.
+func validateHardPathExceptions(entries []HardPathExceptionConfig) error {
+	seen := make(map[string]bool, len(entries))
+	for i, entry := range entries {
+		for _, field := range []struct{ name, value string }{
+			{"path", entry.Path},
+			{"rule", entry.Rule},
+			{"reviewer", entry.Reviewer},
+			{"rationale", entry.Rationale},
+		} {
+			if !reviewedFieldPattern.MatchString(field.value) {
+				return invalid("safety.hard_path_exceptions[%d].%s must be a single trimmed nonempty value", i, field.name)
+			}
+		}
+		if err := validateGlob(entry.Path); err != nil {
+			return invalid("safety.hard_path_exceptions[%d].path: %v", i, err)
+		}
+		if !slices.Contains(hardPathExceptionRules, entry.Rule) {
+			return invalid("safety.hard_path_exceptions[%d].rule %q must be one of %s", i, entry.Rule, strings.Join(hardPathExceptionRules, ", "))
+		}
+		if !reviewedAtPattern.MatchString(entry.ReviewedAt) {
+			return invalid("safety.hard_path_exceptions[%d].reviewed_at must be a calendar date in YYYY-MM-DD form", i)
+		}
+		date, err := time.Parse("2006-01-02", entry.ReviewedAt)
+		if err != nil || date.Format("2006-01-02") != entry.ReviewedAt {
+			return invalid("safety.hard_path_exceptions[%d].reviewed_at %q is not a real calendar date", i, entry.ReviewedAt)
+		}
+		if date.After(time.Now().UTC()) {
+			return invalid("safety.hard_path_exceptions[%d].reviewed_at %s is in the future", i, entry.ReviewedAt)
+		}
+		key := entry.Path + "\x00" + entry.Rule
+		if seen[key] {
+			return invalid("safety.hard_path_exceptions reviews path %q for rule %s more than once", entry.Path, entry.Rule)
+		}
+		seen[key] = true
+	}
+	return nil
 }
 
 func validateGlob(pattern string) error {

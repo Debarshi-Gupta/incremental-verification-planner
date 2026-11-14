@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- runner tail: [32m3 passing[0m | redaction candidates: password=hunter2 AKIAFAKEEXAMPLEKEY -->
+<testsuites>
+  <testsuite name="apps/web/jest.config.ts" timestamp="2026-10-30T13:22:07" tests="3" failures="0" errors="0" skipped="0" time="0.55">
+    <testcase name="путь  с  пробелами renders" classname="apps/web/src/путь.spec.tsx" time="0.04"/>
+    <testcase name="测试 naïve emoji 🎉 renders" classname="apps/web/src/测试.spec.tsx" time="0.03"/>
+    <testcase name="banner with AKIAFAKEEXAMPLEKEY renders" classname="apps/web/src/banner.spec.tsx" time="0.02">
+      <system-out>login password=hunter2 from env; retry 0/3</system-out>
+    </testcase>
+  </testsuite>
+</testsuites>

@@ -155,6 +155,17 @@ func (d *DB) SaveSnapshot(ctx context.Context, b SnapshotBundle) (uuid.UUID, err
 	if err != nil {
 		return uuid.Nil, err
 	}
+	// The adapter versions that produced this snapshot's adapter-specific
+	// evidence are part of the immutable snapshot identity (LLD 18.4): an
+	// adapter version change invalidates the evidence it produced.
+	adapterVersions := map[string]string{}
+	for adapter, version := range s.AdapterVersions {
+		adapterVersions[adapter] = version
+	}
+	adapterVersionsJSON, err := json.Marshal(adapterVersions)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	var finalID uuid.UUID
 	err = d.TenantTx(ctx, b.TenantID.String(), func(tx pgx.Tx) error {
 		var repoExists bool
@@ -164,10 +175,10 @@ func (d *DB) SaveSnapshot(ctx context.Context, b SnapshotBundle) (uuid.UUID, err
 		if !repoExists {
 			return errors.New("repository not found in tenant")
 		}
-		err := tx.QueryRow(ctx, `INSERT INTO repository_snapshots(id,tenant_id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json) DO NOTHING RETURNING id`, s.ID, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.TestConfigDigest, s.AdapterSetDigest, s.GraphVersion, completeness).Scan(&finalID)
+		err := tx.QueryRow(ctx, `INSERT INTO repository_snapshots(id,tenant_id,repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,dependency_digest,adapter_versions_json,graph_version,completeness_json)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,dependency_digest,adapter_versions_json,graph_version,completeness_json) DO NOTHING RETURNING id`, s.ID, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.TestConfigDigest, s.AdapterSetDigest, s.DependencyDigest, adapterVersionsJSON, s.GraphVersion, completeness).Scan(&finalID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return tx.QueryRow(ctx, `SELECT id FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND commit_sha=$3 AND base_sha=$4 AND tree_hash=$5 AND worktree_hash=$6 AND submodule_digest=$7 AND toolchain_digest=$8 AND config_digest=$9 AND test_config_digest=$10 AND adapter_digest=$11 AND graph_version=$12 AND completeness_json=$13`, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.TestConfigDigest, s.AdapterSetDigest, s.GraphVersion, completeness).Scan(&finalID)
+			return tx.QueryRow(ctx, `SELECT id FROM repository_snapshots WHERE tenant_id=$1 AND repository_id=$2 AND commit_sha=$3 AND base_sha=$4 AND tree_hash=$5 AND worktree_hash=$6 AND submodule_digest=$7 AND toolchain_digest=$8 AND config_digest=$9 AND test_config_digest=$10 AND adapter_digest=$11 AND dependency_digest=$12 AND adapter_versions_json=$13 AND graph_version=$14 AND completeness_json=$15`, b.TenantID, s.RepositoryID, s.CommitSHA, s.BaseSHA, s.TreeHash, s.WorktreeHash, s.SubmoduleDigest, s.ToolchainDigest, s.BuildConfigDigest, s.TestConfigDigest, s.AdapterSetDigest, s.DependencyDigest, adapterVersionsJSON, s.GraphVersion, completeness).Scan(&finalID)
 		}
 		if err != nil {
 			return err
@@ -305,7 +316,7 @@ func (d *DB) SaveSnapshot(ctx context.Context, b SnapshotBundle) (uuid.UUID, err
 			if !c.TestSpecific && !c.SuiteLevel {
 				return errors.New("coverage precision must identify test-specific or suite-level evidence")
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO coverage_observations(tenant_id,snapshot_id,test_unit_id,covered_node_id,precision,source,report_hash,run_id,environment_digest,build_config_digest,test_config_digest,line_start,line_end,suite_level,test_specific,evidence_confidence,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, b.TenantID, finalID, unitID, nodeID, c.Precision, c.SourceType, c.ReportHash, c.RunID, c.EnvironmentFingerprint, c.BuildConfigDigest, c.TestConfigDigest, c.LineStart, c.LineEnd, c.SuiteLevel, c.TestSpecific, c.EvidenceConfidence, c.ObservedAt); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO coverage_observations(tenant_id,snapshot_id,test_unit_id,covered_node_id,precision,source,report_hash,run_id,environment_digest,build_config_digest,test_config_digest,dependency_digest,adapter_version,line_start,line_end,suite_level,test_specific,evidence_confidence,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, b.TenantID, finalID, unitID, nodeID, c.Precision, c.SourceType, c.ReportHash, c.RunID, c.EnvironmentFingerprint, c.BuildConfigDigest, c.TestConfigDigest, c.DependencyDigest, c.AdapterVersion, c.LineStart, c.LineEnd, c.SuiteLevel, c.TestSpecific, c.EvidenceConfidence, c.ObservedAt); err != nil {
 				return err
 			}
 		}

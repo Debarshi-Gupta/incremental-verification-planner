@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="example.com/parser" tests="1" errors="0" failures="0" skipped="0" time="0.13">
+    <testcase name="TestParsesDelta" classname="example.com/parser" time="0.12"/>
+  </testsuite>
+</testsuites>

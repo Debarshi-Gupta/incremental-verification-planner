@@ -27,6 +27,16 @@ const (
 
 var objectKeyPattern = regexp.MustCompile(`^[0-9a-f-]{36}/[0-9a-f-]{36}$`)
 
+// ErrNotFound reports that the addressed object is absent from the store. It
+// is distinct from ErrUnavailable so that callers can report a missing
+// artifact honestly instead of masking a storage outage as "not found".
+var ErrNotFound = errors.New("artifact object not found")
+
+// ErrUnavailable reports that the object store could not serve the request.
+// Artifact storage is optional for plan correctness (LLD 1.3), so callers
+// must degrade to a clear, retryable error rather than a data leak.
+var ErrUnavailable = errors.New("artifact store is unavailable")
+
 type Metadata struct {
 	Key       string
 	MediaType string
@@ -102,14 +112,17 @@ func (s *FileStore) Put(ctx context.Context, key, mediaType string, src io.Reade
 		return meta, errors.New("artifact source and size bound between 1 byte and 64 MiB are required")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return meta, fmt.Errorf("create tenant artifact directory: %w", err)
+		return meta, fmt.Errorf("%w: create tenant artifact directory: %v", ErrUnavailable, err)
 	}
 	if err := s.verifyWithinRoot(filepath.Dir(path)); err != nil {
-		return meta, err
+		return meta, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return meta, fmt.Errorf("create artifact object: %w", err)
+		if errors.Is(err, os.ErrExist) {
+			return meta, fmt.Errorf("artifact object already exists: %w", err)
+		}
+		return meta, fmt.Errorf("%w: create artifact object: %v", ErrUnavailable, err)
 	}
 	ok := false
 	defer func() {
@@ -128,10 +141,10 @@ func (s *FileStore) Put(ctx context.Context, key, mediaType string, src io.Reade
 		return meta, errors.New("artifact exceeds configured size limit")
 	}
 	if err := file.Sync(); err != nil {
-		return meta, fmt.Errorf("sync artifact object: %w", err)
+		return meta, fmt.Errorf("%w: sync artifact object: %v", ErrUnavailable, err)
 	}
 	if err := file.Close(); err != nil {
-		return meta, err
+		return meta, fmt.Errorf("%w: close artifact object: %v", ErrUnavailable, err)
 	}
 	ok = true
 	return Metadata{Key: key, MediaType: mediaType, Size: size, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
@@ -145,12 +158,21 @@ func (s *FileStore) Open(ctx context.Context, key string) (io.ReadCloser, error)
 	if err != nil {
 		return nil, err
 	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
 	if err := s.verifyWithinRoot(path); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return f, nil
 }
@@ -179,7 +201,10 @@ func (s *FileStore) Delete(ctx context.Context, key string) error {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: remove artifact object: %v", ErrUnavailable, err)
+	}
+	return nil
 }
 
 func NewID() (uuid.UUID, error) {

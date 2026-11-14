@@ -1,0 +1,4 @@
+Verification tasks
+-------------------
+ test - Runs the shared unit test suite.
+ check - Runs all checks.

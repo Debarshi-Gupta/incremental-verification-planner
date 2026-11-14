@@ -1,0 +1,3 @@
+{"id": {"started": {"eventName": "BUILD"}}, "started": {"exitCode": 0, "success": true}}
+{"id": {"testResult": {"label": "//app:unit"}}, "testResult": {"label": "//app:unit", "status": "PASSED", "testActionExitCode": 0}}
+{"id": {"testSummary": {"label": "//app:unit"}}, "testSummary": {"overallStatus": "PASSED", "totalRunCount": 1, "passed": 1, "failed": 0, "flaky": 0, "totalNumTests": 1}}

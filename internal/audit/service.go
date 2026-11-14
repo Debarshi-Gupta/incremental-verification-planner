@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ivp/ivp/internal/domain"
+	"github.com/ivp/ivp/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Recorder interface {
@@ -21,11 +23,28 @@ type Service struct {
 	Store              Recorder
 	Metrics            Metrics
 	QuarantineDuration time.Duration
+	// Tracer records one span per processed audit when it is set. The span
+	// carries the bounded attributes only (never a test key or a secret).
+	Tracer trace.Tracer
 }
 
 func (s Service) Process(ctx context.Context, in Input) (Result, error) {
 	if s.Store == nil {
 		return Result{}, errors.New("audit recorder is required")
+	}
+	// One span per processed audit: the disposition and the adapter only, so
+	// no test key or environment value can reach the trace (LLD 2.2, 17.5).
+	if s.Tracer != nil {
+		var span trace.Span
+		ctx, span = s.Tracer.Start(ctx, "ivp.audit.process")
+		defer span.End()
+		defer func() {
+			span.SetAttributes(telemetry.SafeAttributes(map[string]string{
+				"ivp.operation": "audit.process",
+				"ivp.adapter":   in.Adapter,
+				"ivp.outcome":   string(Classify(in).Disposition),
+			})...)
+		}()
 	}
 	if in.Now.IsZero() {
 		in.Now = time.Now().UTC()

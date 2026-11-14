@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2" time="0.048" timestamp="2026-11-04T07:55:41.006213" hostname="ci-runner-07">
+    <testcase classname="tests/test_api" file="tests/test_api.py" line="12" name="test_reads_health" time="0.003"/>
+    <testcase classname="tests/test_api" file="tests/test_api.py" line="24" name="test_post_user" time="0.006">
+      <failure message="expected <ok> but got <boom>" type="AssertionError">corrupted marker</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

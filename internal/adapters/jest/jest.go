@@ -15,10 +15,15 @@ import (
 	"github.com/ivp/ivp/internal/adapters/native"
 )
 
-type Adapter struct{ native.Base }
+type Adapter struct {
+	native.Base
+	// capture is an injectable command seam for fixture tests. When nil (the
+	// default), every command runs through adapters.RunCapture unchanged.
+	capture func(ctx context.Context, root, executable string, args []string, limit int64) ([]byte, []byte, error)
+}
 
 func New() *Adapter {
-	return &Adapter{native.Base{Name: "jest", Binary: "jest", Caps: adapters.Capabilities{SelectableGranularity: "JEST_TEST_FILE", DependencyPrecision: "RELATED_TEST_CANDIDATES", CoveragePrecision: "FILE", DiscoveryReliable: true, ResultFormats: []string{"jest-json", "junit-xml"}, SupportsCoverage: true, SupportsFiltering: true}}}
+	return &Adapter{Base: native.Base{Name: "jest", Binary: "jest", Caps: adapters.Capabilities{SelectableGranularity: "JEST_TEST_FILE", DependencyPrecision: "RELATED_TEST_CANDIDATES", CoveragePrecision: "FILE", DiscoveryReliable: true, ResultFormats: []string{"jest-json", "junit-xml"}, SupportsCoverage: true, SupportsFiltering: true}}}
 }
 func (a *Adapter) ID() string { return "jest" }
 func (a *Adapter) Detect(_ context.Context, root string) (adapters.Detection, error) {
@@ -32,7 +37,11 @@ func (a *Adapter) prefix(root string) (string, []string) {
 }
 func (a *Adapter) run(ctx context.Context, root string, args []string, limit int64) ([]byte, []byte, error) {
 	exe, prefix := a.prefix(root)
-	return adapters.RunCapture(ctx, root, exe, append(prefix, args...), limit)
+	argv := append(prefix, args...)
+	if a.capture != nil {
+		return a.capture(ctx, root, exe, argv, limit)
+	}
+	return adapters.RunCapture(ctx, root, exe, argv, limit)
 }
 func (a *Adapter) Version(ctx context.Context, root string) (string, error) {
 	out, stderr, e := a.run(ctx, root, []string{"--version"}, 64<<10)
@@ -65,6 +74,14 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 	if e != nil {
 		return adapters.DiscoveryResult{Complete: false, Reasons: []string{"repository root could not be resolved"}}, e
 	}
+	// A multi-project Jest configuration gives every test file an owning
+	// project. The project layout is read statically from the root
+	// configuration; no JavaScript is executed.
+	projects, projectErr := readJestProjects(req.Root)
+	if projectErr != nil {
+		result.Complete = false
+		result.Reasons = append(result.Reasons, "Jest project configuration could not be resolved")
+	}
 	for _, raw := range paths {
 		rel := filepath.ToSlash(raw)
 		if filepath.IsAbs(raw) {
@@ -90,7 +107,11 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 			continue
 		}
 		seen[rel] = true
-		result.Units = append(result.Units, adapters.TestUnit{Key: rel, DisplayName: rel, Kind: "TEST_FILE", Paths: []string{rel}, SelectableGranularity: "JEST_TEST_FILE", Filterable: true, Timeout: 15 * time.Minute, ReportPaths: []string{".ivp/reports/jest.json"}})
+		unit := discoveredUnit(rel)
+		if scope := projects.scope(rel); scope != "" {
+			unit.Module = scope
+		}
+		result.Units = append(result.Units, unit)
 	}
 	if len(result.Units) == 0 {
 		result.Complete = false
@@ -100,6 +121,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 	// candidates without executing tests. Missing/deleted inputs are treated as
 	// incomplete because the resolver cannot prove their consumers this run.
 	changedInputs := make([]string, 0, len(req.ChangedFiles))
+	changedScopes := map[string]bool{}
 	for _, changed := range req.ChangedFiles {
 		if _, err := adapters.ResolveWithin(req.Root, changed); err != nil {
 			result.Complete = false
@@ -112,7 +134,22 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 			result.Reasons = append(result.Reasons, "Jest related-test input is unavailable")
 			continue
 		}
-		changedInputs = append(changedInputs, filepath.ToSlash(changed))
+		rel := filepath.ToSlash(changed)
+		// A changed path must resolve to the project that owns it. A path
+		// that belongs to no configured project is reported instead of
+		// selecting a unit of an unrelated project.
+		if projects.declared && !projects.failed {
+			owners := projects.owners(rel)
+			if len(owners) == 0 {
+				result.Complete = false
+				result.Reasons = append(result.Reasons, "Jest changed path is outside every configured Jest project")
+				continue
+			}
+			for _, owner := range owners {
+				changedScopes[owner.Scope] = true
+			}
+		}
+		changedInputs = append(changedInputs, rel)
 	}
 	if len(changedInputs) > 0 {
 		relatedArgs := append([]string(nil), req.Config.Options...)
@@ -151,16 +188,37 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 					}
 					relatedSet[rel] = true
 				}
-			for rel := range relatedSet {
-				result.AffectedTargets = append(result.AffectedTargets, rel)
-			}
-			sort.Strings(result.AffectedTargets)
+				for rel := range relatedSet {
+					// A candidate that belongs to a project which owns none of
+					// the changed paths is a mis-attribution and is reported
+					// instead of being selected.
+					if projects.declared && !projects.failed && !ownedByChangedProject(projects, changedScopes, rel) {
+						result.Complete = false
+						result.Reasons = append(result.Reasons, "Jest related-test candidate belongs to a project that owns none of the changed paths")
+						continue
+					}
+					result.AffectedTargets = append(result.AffectedTargets, rel)
+				}
+				sort.Strings(result.AffectedTargets)
 			}
 		}
 	}
 	result.Version, _ = a.Version(ctx, req.Root)
 	return result, nil
 }
+
+// discoveredUnit builds the snapshot unit for one discovered test file. It is
+// kept separate from Discover so the discovery contract (including the
+// report-path pattern) is testable without running the native jest binary.
+func discoveredUnit(rel string) adapters.TestUnit {
+	// Discovery-time globs over the hashed materialized reports
+	// `.ivp/reports/jest-<hash>.json` (see Materialize's --outputFile) and
+	// `build/jest-junit/jest-<hash>.xml` (see Materialize's JUnit reporter);
+	// a fixed name would never match. Same rationale as pytest/gradle/maven
+	// (ADR 0003).
+	return adapters.TestUnit{Key: rel, DisplayName: rel, Kind: "TEST_FILE", Paths: []string{rel}, SelectableGranularity: "JEST_TEST_FILE", Filterable: true, Timeout: 15 * time.Minute, ReportPaths: []string{".ivp/reports/jest*.json", "build/jest-junit/jest*.xml"}}
+}
+
 func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest) (adapters.ExecutionCommand, error) {
 	if e := a.ValidateConfig(req.Config); e != nil {
 		return adapters.ExecutionCommand{}, e
@@ -193,6 +251,15 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	}
 	key := strings.Join(req.TargetKeys, ",")
 	report := filepath.ToSlash(filepath.Join(".ivp", "reports", "jest-"+shortHash(key)+".json"))
+	junit := junitReportPath(key)
+	// The declared junit-xml result format is only honest when the run really
+	// produces a JUnit report. The adapter therefore materializes its JUnit
+	// reporter module and hands it to jest through --reporters.
+	reporter, e := writeJunitReporter(req.Root, junit)
+	if e != nil {
+		return adapters.ExecutionCommand{}, e
+	}
+	args = append(args, "--reporters=default", "--reporters="+reporter)
 	args = append(args, "--json", "--outputFile="+report)
 	exe, prefix := a.prefix(req.Root)
 	args = append(prefix, args...)
@@ -208,7 +275,7 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	if maxOut <= 0 {
 		maxOut = 1 << 20
 	}
-	return adapters.ExecutionCommand{Executable: exe, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: key, ReportPaths: []string{report}, CoveragePaths: append([]string(nil), req.Config.CoveragePaths...), Filtered: true}, nil
+	return adapters.ExecutionCommand{Executable: exe, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, TargetKey: key, ReportPaths: []string{report, junit}, CoveragePaths: append([]string(nil), req.Config.CoveragePaths...), Filtered: true}, nil
 }
 func configuredFull(req adapters.MaterializeRequest) (adapters.ExecutionCommand, error) {
 	exe, args, e := native.ConfiguredCommand(req.Root, req.Config.FullSuiteArgv)
@@ -230,11 +297,43 @@ func configuredFull(req adapters.MaterializeRequest) (adapters.ExecutionCommand,
 	return adapters.ExecutionCommand{Executable: exe, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: maxOut, FullSuite: true}, nil
 }
 func (a *Adapter) ValidateConfig(c adapters.AdapterConfig) error { return a.Base.ValidateConfig(c) }
+
+// ParseResults reads the Jest JSON result report. The JUnit XML report of the
+// same run is an additional artifact, so parsing both would count every test
+// twice; the JSON report is authoritative and the JUnit report is only read
+// when no JSON report is available.
 func (a *Adapter) ParseResults(ctx context.Context, r adapters.ParseRequest) (adapters.ParsedResults, error) {
+	if jsonReports := jsonResultReports(r.ReportPaths); len(jsonReports) > 0 {
+		request := r
+		request.ReportPaths = jsonReports
+		return a.Base.ParseResults(ctx, request)
+	}
 	return a.Base.ParseResults(ctx, r)
+}
+
+// jsonResultReports returns the Jest JSON result reports of a report set.
+func jsonResultReports(paths []string) []string {
+	var reports []string
+	for _, path := range paths {
+		if strings.EqualFold(filepath.Ext(path), ".json") {
+			reports = append(reports, path)
+		}
+	}
+	return reports
 }
 func (a *Adapter) ParseCoverage(ctx context.Context, r adapters.CoverageRequest) (adapters.CoverageResult, error) {
 	return a.Base.ParseCoverage(ctx, r)
+}
+
+// ownedByChangedProject reports whether the path belongs to one of the
+// projects that own the changed paths of the current discovery.
+func ownedByChangedProject(projects jestProjects, changedScopes map[string]bool, path string) bool {
+	for _, owner := range projects.owners(path) {
+		if changedScopes[owner.Scope] {
+			return true
+		}
+	}
+	return false
 }
 func shortHash(value string) string {
 	var sum uint64 = 1469598103934665603

@@ -1,9 +1,19 @@
 # IVP LLD implementation assessment
 
-**Assessment date:** 2026-10-30  
+**Assessment date:** 2026-10-30 · **Status:** point-in-time assessment (superseded)
 **Source of truth:** `docs/Incremental_Verification_Planner_LLD.md` and `docs/requirements-inventory.json`
 
-## Score and interpretation
+> **This document records the assessment as it stood on 2026-10-30.** The
+> requirement-level assessment has since been completed: the current status is
+> published in the generated tracker
+> [`docs/implementation-tracker.md`](implementation-tracker.md)
+> (implementation coverage 100.0%, verified completion 55.8%, assessment
+> coverage 100.0%, 853/853 rows reviewed) and the per-package evidence is in
+> [`docs/implementation-log.md`](implementation-log.md). The scores below are
+> kept as the baseline of the completion plan and are **not** the current
+> status.
+
+## Score and interpretation (2026-10-30)
 
 The inventory contains 853 atomic requirements. The current requirement-level assessment is **4.5% implementation coverage (38/853)** and **3.4% verified completion (29/853)**, with **6.0% assessment coverage (51/853)**. These are conservative lower bounds because 802 rows remain unreviewed; an unreviewed row is not evidence that related code is absent. Current 100% completion requires every row to have reviewed implementation references, passing validation, and recorded evidence.
 

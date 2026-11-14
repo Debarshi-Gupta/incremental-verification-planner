@@ -1,0 +1,8 @@
+[project]
+name = "sample-inject"
+version = "0.1.0"
+description = "Section 17.3 change-injection fixture repository"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["orders", "service", "utils"]

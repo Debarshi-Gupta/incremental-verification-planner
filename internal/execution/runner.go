@@ -22,6 +22,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/ivp/ivp/internal/adapters"
 	"github.com/ivp/ivp/internal/domain"
+	"github.com/ivp/ivp/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Status string
@@ -45,6 +47,10 @@ type RunnerOptions struct {
 	MaxOutputBytes     int64
 	AllowedEnvironment []string
 	TerminationGrace   time.Duration
+	// Tracer records one span per executed command when it is set. The span
+	// carries the bounded attributes only (never command arguments or
+	// output), so a trace can never leak a secret.
+	Tracer trace.Tracer
 }
 
 type Runner struct {
@@ -100,6 +106,20 @@ func (r *Runner) Run(ctx context.Context, command adapters.ExecutionCommand) Res
 	finish := func() {
 		result.CompletedAt = time.Now().UTC()
 		result.Duration = result.CompletedAt.Sub(result.StartedAt)
+	}
+	// One span per executed command: the target key and the outcome only, so
+	// no command argument or output can reach the trace (LLD 2.2, 17.5).
+	if r.options.Tracer != nil {
+		var span trace.Span
+		ctx, span = r.options.Tracer.Start(ctx, "ivp.execution.command")
+		defer span.End()
+		defer func() {
+			span.SetAttributes(telemetry.SafeAttributes(map[string]string{
+				"ivp.operation": "execution.command",
+				"ivp.outcome":   string(result.Outcome),
+				"error.type":    result.ErrorClass,
+			})...)
+		}()
 	}
 	if err := r.validate(command); err != nil {
 		result.Status = StatusInfraError
@@ -237,6 +257,20 @@ func (r *Runner) Run(ctx context.Context, command adapters.ExecutionCommand) Res
 	var waitErr error
 	select {
 	case waitErr = <-wait:
+		// The child can exit (for example after a console control event tore
+		// it down) marginally before this goroutine observes the context
+		// cancellation. Classify by context so a cancelled run is never
+		// reported as a plain process failure: downstream code maps
+		// StatusCancelled to the cancelled exit code (LLD 16 row 15).
+		if ctx.Err() != nil {
+			status, errClass := StatusCancelled, "CANCELLED"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				status, errClass = StatusTimedOut, "TIMEOUT"
+			}
+			result.Status = status
+			result.ErrorClass = errClass
+			result.Error = ctx.Err().Error()
+		}
 	case <-processCtx.Done():
 		status := StatusCancelled
 		errClass := "CANCELLED"
@@ -395,8 +429,8 @@ func (r *Runner) RunAndParse(ctx context.Context, adapter adapters.Adapter, comm
 // modification time recognizes freshly rewritten but byte-identical reports
 // while rejecting stale reports left by a prior run.
 type ReportFingerprint struct {
-	Hash         string
-	Size         int64
+	Hash          string
+	Size          int64
 	ModifiedNanos int64
 }
 
@@ -417,6 +451,22 @@ func FingerprintReports(root string, patterns []string) map[string]ReportFingerp
 	return result
 }
 
+// canonicalRoot returns the absolute, symlink-resolved form of root so it is
+// directly comparable with paths produced by adapters.ResolveWithin (which
+// canonicalizes the same way). On hosts where temp directories carry 8.3
+// short names, an uncanonicalized root makes filepath.Rel report every match
+// as escaping the workspace, silently dropping all reports.
+func canonicalRoot(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return root
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
 // FreshReports returns only concrete, safe report paths that were created or
 // changed by the latest command. Parsers never consume stale files matching a
 // configured glob.
@@ -428,7 +478,7 @@ func FreshReports(root string, patterns []string, before map[string]ReportFinger
 		if existed && previous == fingerprint {
 			continue
 		}
-		rel, err := filepath.Rel(root, file)
+		rel, err := filepath.Rel(canonicalRoot(root), file)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			continue
 		}
@@ -454,7 +504,7 @@ func expandReportPaths(root string, patterns []string) []string {
 			}
 		}
 		for _, match := range matches {
-			rel, err := filepath.Rel(root, match)
+			rel, err := filepath.Rel(canonicalRoot(root), match)
 			if err != nil {
 				continue
 			}
@@ -716,6 +766,10 @@ type PlanRevalidation struct {
 	Now                 time.Time
 	KnownTargetRefs     map[string]bool
 	MandatoryChecks     []string
+	// EnvironmentFingerprint is the execution environment fingerprint
+	// recomputed by the executor. It is compared with the fingerprint the
+	// plan was created for (LLD 9.4).
+	EnvironmentFingerprint string
 }
 
 func ValidatePlan(plan domain.VerificationPlan, v PlanRevalidation) error {
@@ -730,6 +784,9 @@ func ValidatePlan(plan domain.VerificationPlan, v PlanRevalidation) error {
 	}
 	if plan.WorktreeHash == "" || v.CurrentWorktreeHash == "" || plan.WorktreeHash != v.CurrentWorktreeHash {
 		return errors.New("worktree fingerprint missing or changed")
+	}
+	if err := ValidateEnvironment(plan, v.EnvironmentFingerprint); err != nil {
+		return err
 	}
 	if v.PolicyVersion == 0 || plan.PolicyVersion != v.PolicyVersion {
 		return errors.New("policy version changed or unavailable")

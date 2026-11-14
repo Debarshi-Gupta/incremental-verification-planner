@@ -28,31 +28,31 @@ import (
 )
 
 type localRun struct {
-	Version           int                       `json:"version"`
-	State             string                    `json:"state"`
-	PlanID            uuid.UUID                 `json:"plan_id"`
-	ExecutionID       uuid.UUID                 `json:"execution_id,omitempty"`
-	LocalID           uuid.UUID                 `json:"local_id"`
-	WorktreeHash      string                    `json:"worktree_hash"`
-	EnvironmentDigest string                    `json:"environment_digest"`
-	StartKey          string                    `json:"start_idempotency_key"`
-	ResultKey         string                    `json:"result_idempotency_key"`
-	FullSuite         bool                      `json:"full_suite"`
-	StartedAt         time.Time                 `json:"started_at"`
-	CompletedAt       time.Time                 `json:"completed_at,omitempty"`
-	Outcome           domain.ExecutionOutcome   `json:"outcome,omitempty"`
-	Summary           api.ExecutionSummary      `json:"summary"`
-	UnitResults       []api.ExecutionUnitResult `json:"unit_results,omitempty"`
+	Version           int                          `json:"version"`
+	State             string                       `json:"state"`
+	PlanID            uuid.UUID                    `json:"plan_id"`
+	ExecutionID       uuid.UUID                    `json:"execution_id,omitempty"`
+	LocalID           uuid.UUID                    `json:"local_id"`
+	WorktreeHash      string                       `json:"worktree_hash"`
+	EnvironmentDigest string                       `json:"environment_digest"`
+	StartKey          string                       `json:"start_idempotency_key"`
+	ResultKey         string                       `json:"result_idempotency_key"`
+	FullSuite         bool                         `json:"full_suite"`
+	StartedAt         time.Time                    `json:"started_at"`
+	CompletedAt       time.Time                    `json:"completed_at,omitempty"`
+	Outcome           domain.ExecutionOutcome      `json:"outcome,omitempty"`
+	Summary           api.ExecutionSummary         `json:"summary"`
+	UnitResults       []api.ExecutionUnitResult    `json:"unit_results,omitempty"`
 	Coverage          []domain.CoverageObservation `json:"coverage,omitempty"`
-	EvidenceWarnings  []string                  `json:"evidence_warnings,omitempty"`
-	ExitCode          *int                      `json:"exit_code,omitempty"`
-	ElapsedMillis     int64                     `json:"elapsed_ms,omitempty"`
-	ComputeMillis     int64                     `json:"compute_ms,omitempty"`
-	ReportPath        string                    `json:"report_path,omitempty"`
-	ReportPaths       []string                  `json:"report_paths,omitempty"`
-	UploadedReports   map[string]string         `json:"uploaded_reports,omitempty"`
-	IsolatedWorkspace bool                      `json:"isolated_workspace,omitempty"`
-	CommandResults    []execution.Result        `json:"command_results,omitempty"`
+	EvidenceWarnings  []string                     `json:"evidence_warnings,omitempty"`
+	ExitCode          *int                         `json:"exit_code,omitempty"`
+	ElapsedMillis     int64                        `json:"elapsed_ms,omitempty"`
+	ComputeMillis     int64                        `json:"compute_ms,omitempty"`
+	ReportPath        string                       `json:"report_path,omitempty"`
+	ReportPaths       []string                     `json:"report_paths,omitempty"`
+	UploadedReports   map[string]string            `json:"uploaded_reports,omitempty"`
+	IsolatedWorkspace bool                         `json:"isolated_workspace,omitempty"`
+	CommandResults    []execution.Result           `json:"command_results,omitempty"`
 }
 
 func (c *commands) loadPlan(ctx context.Context, cfg config.Config, reference string) (domain.VerificationPlan, error) {
@@ -348,24 +348,29 @@ func (c *commands) runOfflineFullSuite(ctx context.Context, out io.Writer, root 
 	summary := api.ExecutionSummary{Total: 1, FailureClasses: map[string]int{}}
 	switch {
 	case result.Status == execution.StatusCancelled:
-		outcome, exitCode = domain.OutcomeInfraFailure, 8
+		outcome, exitCode = domain.OutcomeInfraFailure, exitCodeForOutcome(domain.OutcomeInfraFailure, true)
 		summary.FailureClasses["CANCELLED"]++
 	case result.Status != execution.StatusCompleted || result.ExitCode == nil:
-		outcome, exitCode = domain.OutcomeInfraFailure, 6
+		outcome, exitCode = domain.OutcomeInfraFailure, exitCodeForOutcome(domain.OutcomeInfraFailure, false)
 		summary.FailureClasses["INFRA_FAILURE"]++
 	case *result.ExitCode != 0:
-		outcome, exitCode = domain.OutcomeFullVerificationFail, 1
+		outcome, exitCode = domain.OutcomeFullVerificationFail, exitCodeForOutcome(domain.OutcomeFullVerificationFail, false)
 		summary.Failed = 1
 	default:
 		summary.Passed = 1
 	}
-	currentWorktree, fingerprintErr := gitutil.WorktreeFingerprint(ctx, root)
-	if fingerprintErr != nil {
-		outcome, exitCode = domain.OutcomeInfraFailure, 6
-		summary.FailureClasses["WORKTREE_REVALIDATION_FAILED"]++
-	} else if currentWorktree != worktree {
-		outcome, exitCode = domain.OutcomeStale, 5
-		summary.FailureClasses["WORKTREE_MUTATED"]++
+	// After cancellation this revalidation would run git with a dead context,
+	// fail, and replace exit code 8 with 6; skip it so the cancelled outcome
+	// survives (LLD 16 row 15).
+	if ctx.Err() == nil {
+		currentWorktree, fingerprintErr := gitutil.WorktreeFingerprint(ctx, root)
+		if fingerprintErr != nil {
+			outcome, exitCode = domain.OutcomeInfraFailure, exitCodeForOutcome(domain.OutcomeInfraFailure, false)
+			summary.FailureClasses["WORKTREE_REVALIDATION_FAILED"]++
+		} else if currentWorktree != worktree {
+			outcome, exitCode = domain.OutcomeStale, exitCodeForOutcome(domain.OutcomeStale, false)
+			summary.FailureClasses["WORKTREE_MUTATED"]++
+		}
 	}
 	if result.StdoutHash != "" {
 		summary.OutputHashes = append(summary.OutputHashes, result.StdoutHash)
@@ -568,22 +573,18 @@ func (c *commands) executeCommands(ctx context.Context, out io.Writer, root stri
 			switch {
 			case anyInfrastructureFailure:
 				overall = domain.OutcomeInfraFailure
-				if anyCancellation {
-					exitCode = 8
-				} else {
-					exitCode = 6
-				}
+				exitCode = exitCodeForOutcome(overall, anyCancellation)
 			case anyTestFailure:
 				overall = domain.OutcomeTargetedFail
-				exitCode = 1
+				exitCode = exitCodeForOutcome(overall, false)
 			}
 			if err := revalidateExecution(ctx, root, client, repositoryID, plan, record); err != nil {
 				if errors.Is(err, errPlanStale) {
-					overall, exitCode = domain.OutcomeStale, 5
+					overall, exitCode = domain.OutcomeStale, exitCodeForOutcome(domain.OutcomeStale, false)
 				} else if ctx.Err() != nil {
-					overall, exitCode = domain.OutcomeInfraFailure, 8
+					overall, exitCode = domain.OutcomeInfraFailure, exitCodeForOutcome(domain.OutcomeInfraFailure, true)
 				} else {
-					overall, exitCode = domain.OutcomeInfraFailure, 6
+					overall, exitCode = domain.OutcomeInfraFailure, exitCodeForOutcome(domain.OutcomeInfraFailure, false)
 				}
 				fmt.Fprintf(out, "Execution result was recorded, but revalidation failed: %s\n", security.Redact(err.Error(), 240))
 				break
@@ -604,15 +605,22 @@ func (c *commands) executeCommands(ctx context.Context, out io.Writer, root stri
 			local.Summary.OutputHashes = append(local.Summary.OutputHashes, result.StderrHash)
 		}
 	}
-	current, hashErr := gitutil.WorktreeFingerprint(ctx, root)
-	if hashErr != nil {
-		return exitError{6, hashErr}
-	}
-	if current != plan.WorktreeHash {
-		local.Outcome = domain.OutcomeStale
-		local.ExitCode = ptrInt(5)
-		local.State = "RESULT_READY"
-		fmt.Fprintln(out, "Worktree changed during execution; the result is marked STALE.")
+	// A cancelled context must not fail the post-run steps: worktree
+	// revalidation runs git under this context, and its failure would replace
+	// the CANCELLED exit code (8) with a generic infrastructure failure. The
+	// report below still persists the cancelled result for a later resume
+	// (LLD 16 row 15).
+	if ctx.Err() == nil {
+		current, hashErr := gitutil.WorktreeFingerprint(ctx, root)
+		if hashErr != nil {
+			return exitError{6, hashErr}
+		}
+		if current != plan.WorktreeHash {
+			local.Outcome = domain.OutcomeStale
+			local.ExitCode = ptrInt(5)
+			local.State = "RESULT_READY"
+			fmt.Fprintln(out, "Worktree changed during execution; the result is marked STALE.")
+		}
 	}
 	reportRoot, err := safeWorkspacePath(root, filepath.Join(".ivp", "reports"))
 	if err != nil {
@@ -633,11 +641,18 @@ func (c *commands) executeCommands(ctx context.Context, out io.Writer, root stri
 			return exitError{6, err}
 		}
 	}
-	if err = uploadLocalArtifacts(ctx, root, client, local); err != nil {
-		return err
-	}
-	if err = uploadLocalResult(ctx, out, client, repositoryID, local, localPath, c.stdout); err != nil {
-		return err
+	// Uploads share the command context; after cancellation they would fail
+	// and mask exit code 8. The result stays stored locally and resumes on
+	// the next `ivp run --plan` invocation.
+	if ctx.Err() == nil {
+		if err = uploadLocalArtifacts(ctx, root, client, local); err != nil {
+			return err
+		}
+		if err = uploadLocalResult(ctx, out, client, repositoryID, local, localPath, c.stdout); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(out, "Result upload deferred because the run was cancelled; run `ivp run` for this plan again to upload the stored result.")
 	}
 	fmt.Fprintf(out, "Outcome: %s\nVerification level: %s\nReport: %s\n", local.Outcome, verificationLevel(local.Outcome), local.ReportPath)
 	if exitCode != 0 {
@@ -1229,11 +1244,79 @@ func collectCoverageObservations(ctx context.Context, root string, adapter adapt
 				Precision: domain.CoverageFile, SuiteLevel: true, TestSpecific: false, EvidenceConfidence: 0.65,
 			})
 		}
+		// Per-test contexts (LLD 8.6): when the report attributes coverage to
+		// individual tests, that evidence is recorded per test instead of
+		// being lost in the suite-level aggregate.
+		contextObservations, contextWarnings := perTestCoverageObservations(parsed, record, sourceNodes, adapter.ID(), reportHash, local)
+		observations = append(observations, contextObservations...)
+		warnings = append(warnings, contextWarnings...)
 	}
 	if len(observations) == 0 && len(warnings) == 0 {
 		warnings = append(warnings, "coverage report was unchanged from before this execution")
 	}
 	return observations, uniqueStrings(warnings)
+}
+
+// perTestCoverageObservations turns the per-test contexts of a coverage
+// report into test-specific coverage observations (LLD 8.6). A context is
+// attributed only when it names a discovered test unit and the covered file
+// is part of the indexed source inventory; anything else is reported instead
+// of being attributed to the wrong test.
+func perTestCoverageObservations(parsed adapters.CoverageResult, record indexRecord, sourceNodes map[string]domain.GraphNode, adapterID string, reportHash string, local *localRun) ([]domain.CoverageObservation, []string) {
+	if len(parsed.Contexts) == 0 {
+		return nil, nil
+	}
+	units := make(map[string]bool, len(record.Units))
+	for _, unit := range record.Units {
+		units[unit.StableKey] = true
+	}
+	var observations []domain.CoverageObservation
+	var warnings []string
+	unmatched := 0
+	for name, context := range parsed.Contexts {
+		unitKey, ok := contextUnitKey(name, units)
+		if !ok {
+			unmatched++
+			continue
+		}
+		for path, lines := range context.Files {
+			node, exists := sourceNodes[filepath.ToSlash(path)]
+			if !exists {
+				warnings = append(warnings, "coverage context referenced a source path outside the indexed repository inventory")
+				continue
+			}
+			for _, line := range lines {
+				if line <= 0 {
+					continue
+				}
+				observations = append(observations, domain.CoverageObservation{
+					TestUnitKey: unitKey, CoveredStableKey: node.StableKey, CoveredPath: node.Path,
+					SourceType: adapterID + ":" + parsed.Format + ":context", ReportHash: reportHash, RunID: local.ExecutionID,
+					ObservedAt: time.Now().UTC(), EnvironmentFingerprint: local.EnvironmentDigest,
+					BuildConfigDigest: record.Snapshot.BuildConfigDigest, TestConfigDigest: record.Snapshot.TestConfigDigest,
+					Precision: domain.CoverageLine, LineStart: line, LineEnd: line,
+					SuiteLevel: false, TestSpecific: true, EvidenceConfidence: 0.95,
+				})
+			}
+		}
+	}
+	if unmatched > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d coverage contexts did not match a discovered test unit and were ignored", unmatched))
+	}
+	return observations, uniqueStrings(warnings)
+}
+
+// contextUnitKey resolves a coverage context name to a discovered test unit.
+// pytest-cov names a context "<node id>|<phase>"; the phase suffix is dropped
+// when the bare node id names a unit.
+func contextUnitKey(name string, units map[string]bool) (string, bool) {
+	if units[name] {
+		return name, true
+	}
+	if base, _, found := strings.Cut(name, "|"); found && units[base] {
+		return base, true
+	}
+	return "", false
 }
 
 func validatePlanLocal(plan domain.VerificationPlan, record indexRecord, current string, fullSuite bool) error {

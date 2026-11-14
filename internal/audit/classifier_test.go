@@ -80,6 +80,25 @@ func TestUnreviewedUnrelatedFailureRemainsPossible(t *testing.T) {
 	}
 }
 
+// ADR 0015: an AUDIT_* outcome counts as the pass it was reclassified from,
+// so re-auditing an already-reclassified execution still reaches the miss
+// analysis instead of being mistaken for a failed selected run.
+func TestAuditOutcomeSelectedRunStillReachesMissAnalysis(t *testing.T) {
+	for _, outcome := range []domain.ExecutionOutcome{domain.OutcomeAuditMiss, domain.OutcomeAuditPossibleMiss, domain.OutcomeAuditIncomparable} {
+		t.Run(string(outcome), func(t *testing.T) {
+			a, b := equivalentFingerprints()
+			in := auditInput(a, b)
+			in.SelectedOutcome = outcome
+			in.SelectedKeys = []string{"selected"}
+			in.Failures = []Failure{{TestUnitKey: "omitted", Reproduced: true, RelatedToChange: true}}
+			r := Classify(in)
+			if r.Disposition != DispositionConfirmed || !r.Quarantine || len(r.MissedTestKeys) != 1 || r.Record.Outcome != domain.AuditConfirmedMiss {
+				t.Fatalf("AUDIT_* selected outcome did not reach miss analysis: %+v", r)
+			}
+		})
+	}
+}
+
 func TestReviewedUnrelatedFailureIsNotMiss(t *testing.T) {
 	a, b := equivalentFingerprints()
 	in := auditInput(a, b)

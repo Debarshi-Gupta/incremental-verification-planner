@@ -1,0 +1,42 @@
+version: 1
+
+execution:
+  full_suite_argv: ["python3", "-m", "pytest", "-q"]
+
+adapters:
+  generic:
+    enabled: true
+    test_units:
+      - id: unit-core
+        display_name: Core unit tests
+        argv: ["python3", "-m", "pytest", "-q", "tests/test_core.py"]
+        maps_paths: ["app/core.py"]
+        report_paths: ["reports/unit-core.xml"]
+        coverage_paths: ["coverage/unit-core.xml"]
+        timeout_seconds: 120
+        estimated_duration_seconds: 45
+        resource_group: cpu-small
+      - id: unit-api
+        display_name: API unit tests
+        argv: ["python3", "-m", "pytest", "-q", "tests/test_api.py"]
+        maps_paths: ["app/api.py"]
+        report_paths: ["reports/unit-api.xml"]
+        depends_on: ["unit-core"]
+        timeout_seconds: 180
+        estimated_duration_seconds: 60
+        resource_group: cpu-large
+    checks:
+      - id: check-secret-scan
+        display_name: Secret scan
+        argv: ["python3", "tools/scan_secrets.py"]
+        maps_paths: ["**/*.py"]
+        mandatory: true
+        timeout_seconds: 60
+        estimated_duration_seconds: 15
+        resource_group: io
+      - id: check-format
+        display_name: Format check
+        argv: ["python3", "tools/format_check.py", "{changed_files}"]
+        depends_on: ["check-secret-scan"]
+        timeout_seconds: 60
+        estimated_duration_seconds: 20

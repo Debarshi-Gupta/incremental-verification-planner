@@ -83,7 +83,19 @@ func serve(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 	metrics := telemetry.NewMetrics()
+	// The OTLP exporter is what makes a span observable: without an endpoint
+	// the provider records spans that nobody can read. The endpoint is
+	// operator-provided through IVP_OTLP_ENDPOINT.
 	tracing, err := telemetry.NewTracing("ivp-api", nil)
+	if endpoint := strings.TrimSpace(os.Getenv("IVP_OTLP_ENDPOINT")); endpoint != "" {
+		insecure := strings.EqualFold(strings.TrimSpace(os.Getenv("IVP_OTLP_INSECURE")), "true")
+		exported, exportErr := telemetry.NewOTLPTracing(context.Background(), "ivp-api", endpoint, insecure)
+		if exportErr != nil {
+			logger.Warn("otlp tracing exporter is unavailable", "error", exportErr)
+		} else {
+			tracing = exported
+		}
+	}
 	if err != nil {
 		return err
 	}

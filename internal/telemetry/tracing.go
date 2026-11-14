@@ -7,6 +7,7 @@ import (
 
 	"github.com/ivp/ivp/internal/security"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -32,6 +33,30 @@ func NewTracing(serviceName string, exporter sdktrace.SpanExporter) (*Tracing, e
 	}
 	p := sdktrace.NewTracerProvider(options...)
 	return &Tracing{Provider: p, Tracer: p.Tracer("github.com/ivp/ivp")}, nil
+}
+
+// NewOTLPTracing builds a tracing provider that exports spans over OTLP.
+//
+// The exporter is what turns a span into observable evidence: without it the
+// provider records spans that nobody can read (LLD 2.2 observability). The
+// endpoint is operator-provided; an insecure endpoint is only accepted for
+// local development.
+func NewOTLPTracing(ctx context.Context, serviceName, endpoint string, insecure bool) (*Tracing, error) {
+	if strings.TrimSpace(serviceName) == "" {
+		return nil, errors.New("service name required")
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		return nil, errors.New("otlp endpoint required")
+	}
+	options := []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
+	if insecure {
+		options = append(options, otlptracehttp.WithInsecure())
+	}
+	exporter, err := otlptracehttp.New(ctx, options...)
+	if err != nil {
+		return nil, err
+	}
+	return NewTracing(serviceName, exporter)
 }
 
 func (t *Tracing) Shutdown(ctx context.Context) error {

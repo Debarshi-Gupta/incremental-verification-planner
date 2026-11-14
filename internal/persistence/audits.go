@@ -49,7 +49,7 @@ func (d *DB) RecordAuditAndQuarantine(ctx context.Context, in audit.Input, resul
 			Scan(&repositoryID, &planID, &selectedOutcome, &fullOutcome, &fullSummary); err != nil {
 			return errors.New("audit executions must belong to this tenant and the same plan")
 		}
-		if repositoryID != in.RepositoryID || planID != in.PlanID || selectedOutcome != in.SelectedOutcome || fullOutcome != in.FullOutcome {
+		if repositoryID != in.RepositoryID || planID != in.PlanID || !auditOutcomeMatches(selectedOutcome, in.SelectedOutcome) || !auditOutcomeMatches(fullOutcome, in.FullOutcome) {
 			return errors.New("audit input does not match persisted repository, plan, or execution outcomes")
 		}
 		var fullMeta struct {
@@ -67,14 +67,29 @@ func (d *DB) RecordAuditAndQuarantine(ctx context.Context, in audit.Input, resul
 		if _, err := tx.Exec(ctx, `INSERT INTO audit_records(id,tenant_id,execution_id,full_execution_id,comparability,outcome,missed_test_keys_json,details_json,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, result.Record.ID, in.TenantID, in.SelectedExecutionID, in.FullExecutionID, comparability, result.Record.Outcome, missed, details, result.Record.CreatedAt); err != nil {
 			return err
 		}
+		// Reclassify the audited selected execution so its stored outcome
+		// reflects what the audit established (ADR 0015). The WHERE guard
+		// keeps the update on the outcome this transaction read; a
+		// concurrent re-audit that changed it first fails the whole audit
+		// so it can be retried against fresh state.
+		if newOutcome, ok := AuditOutcomeTransition(selectedOutcome, result.Disposition); ok && newOutcome != selectedOutcome {
+			tag, err := tx.Exec(ctx, `UPDATE executions SET outcome=$3 WHERE tenant_id=$1 AND id=$2 AND outcome=$4`, in.TenantID, in.SelectedExecutionID, newOutcome, selectedOutcome)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return errors.New("audit selected execution outcome changed concurrently")
+			}
+		}
 		for _, failure := range in.Failures {
 			if failure.RepeatCount == 0 {
 				continue
 			}
-			flakeClass := "REPEATED"
-			if failure.Flaky {
-				flakeClass = "FLAKY"
+			observations, err := comparableObservationCount(ctx, tx, in.TenantID, in.FullExecutionID, failure.TestUnitKey)
+			if err != nil {
+				return err
 			}
+			flakeClass := flakeClassification(failure.Flaky, observations, in.FlakeMinimumComparableObservations)
 			if _, err := tx.Exec(ctx, `UPDATE test_history h SET retry_count=GREATEST(h.retry_count,$4),flake_classification=$5
 				FROM executions e JOIN verification_plans p ON p.id=e.plan_id AND p.tenant_id=e.tenant_id
 				JOIN repository_snapshots s ON s.id=p.snapshot_id AND s.repository_id=p.repository_id
@@ -111,6 +126,81 @@ func quarantineScope(adapter, rule string) string {
 		rule = "all"
 	}
 	return adapter + "/" + rule
+}
+
+// comparableObservationCount reports how many comparable samples the test
+// already carries for the same repository, environment and test configuration
+// as the audited full run (the same comparability identity ApplyTestHistory
+// aggregates, minus the rolling window: LLD 7.3 asks for a minimum number of
+// comparable observations before flakiness may be classified, while the
+// rolling window governs the read-side flake rate, which stays gated in
+// ApplyTestHistory). Requiring PostgreSQL, its direct assertion is
+// integration-only.
+func comparableObservationCount(ctx context.Context, tx pgx.Tx, tenantID, fullExecutionID uuid.UUID, testUnitKey string) (int64, error) {
+	var observations int64
+	err := tx.QueryRow(ctx, `SELECT count(*)
+		FROM test_history h
+		JOIN executions e ON e.tenant_id=$1 AND e.id=$2
+		JOIN verification_plans p ON p.id=e.plan_id AND p.tenant_id=e.tenant_id
+		JOIN repository_snapshots s ON s.id=p.snapshot_id AND s.repository_id=p.repository_id
+		WHERE h.tenant_id=$1 AND h.repository_id=p.repository_id AND h.stable_test_key=$3
+		AND h.environment_digest=e.environment_digest AND h.test_config_digest=s.test_config_digest
+		AND h.outcome IN ('PASS','FAIL') AND h.duration_ms>0`, tenantID, fullExecutionID, testUnitKey).Scan(&observations)
+	return observations, err
+}
+
+// flakeClassification decides the flake_classification an audit repeat writes
+// (LLD 7.3). FLAKY requires at least flakeMinimumObservations comparable
+// observations: below the minimum — or with a non-positive minimum, which
+// config validation forbids and which must never silently disable the gate —
+// a flaky failure records no classification instead of claiming flakiness
+// from insufficient evidence. Reproduced repeats keep REPEATED, which records
+// retry reproducibility, not flakiness, and is not gated; the vocabulary
+// (empty, REPEATED, FLAKY) is unchanged. It is pure so the gate is
+// unit-testable without a database.
+func flakeClassification(flaky bool, observations int64, flakeMinimumObservations int) string {
+	if !flaky {
+		return "REPEATED"
+	}
+	if flakeMinimumObservations < 1 || observations < int64(flakeMinimumObservations) {
+		return ""
+	}
+	return "FLAKY"
+}
+
+// AuditOutcomeTransition maps an audit disposition onto the execution outcome
+// it implies for the audited selected run. Only a passing outcome or an
+// outcome already reclassified by an audit may be reclassified; failing,
+// infra-failed, and stale executions keep their outcome. The transition is
+// pure so its rules are testable without a database (ADR 0015).
+func AuditOutcomeTransition(current domain.ExecutionOutcome, disposition audit.Disposition) (domain.ExecutionOutcome, bool) {
+	var target domain.ExecutionOutcome
+	switch disposition {
+	case audit.DispositionConfirmed:
+		target = domain.OutcomeAuditMiss
+	case audit.DispositionPossible:
+		target = domain.OutcomeAuditPossibleMiss
+	case audit.DispositionIncomparable:
+		target = domain.OutcomeAuditIncomparable
+	default:
+		return current, false
+	}
+	if !domain.IsPassLikeOutcome(current) {
+		return current, false
+	}
+	return target, true
+}
+
+// auditOutcomeMatches reports whether a persisted execution outcome matches
+// the outcome an audit input declares. A re-audit may present the outcome the
+// execution held before an earlier audit reclassified it, so an AUDIT_*
+// outcome and its originating passing outcome are equivalent (ADR 0015).
+func auditOutcomeMatches(persisted, declared domain.ExecutionOutcome) bool {
+	if persisted == declared {
+		return true
+	}
+	return domain.IsPassLikeOutcome(persisted) && domain.IsPassLikeOutcome(declared) &&
+		(domain.IsAuditOutcome(persisted) || domain.IsAuditOutcome(declared))
 }
 
 func verifyAuditUnitEvidence(ctx context.Context, tx pgx.Tx, in audit.Input) error {
@@ -230,9 +320,14 @@ func (d *DB) ClearEligibleQuarantine(ctx context.Context, tenantID, actorID, rep
 	}
 	return d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		var acknowledgedBy uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT acknowledged_by FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND scope_key=$3 AND status='ACKNOWLEDGED' AND acknowledged_by IS NOT NULL AND acknowledged_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at <= $4 FOR UPDATE`, tenantID, repositoryID, scope, now).Scan(&acknowledgedBy)
+		// LLD 10.5: clearing requires acknowledgement plus a clean comparable
+		// audit. Expiry alone is not the gate: a never-expiring quarantine
+		// (expires_at IS NULL) becomes clearable once acknowledged and followed
+		// by a clean audit, while an unexpired one must still wait for its
+		// expiry window (or have no expiry at all).
+		err := tx.QueryRow(ctx, `SELECT acknowledged_by FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND scope_key=$3 AND status='ACKNOWLEDGED' AND acknowledged_by IS NOT NULL AND acknowledged_at IS NOT NULL AND (expires_at IS NULL OR expires_at <= $4) FOR UPDATE`, tenantID, repositoryID, scope, now).Scan(&acknowledgedBy)
 		if err != nil {
-			return errors.New("quarantine must be acknowledged and expired before clearing")
+			return errors.New("quarantine must be acknowledged and either expired or non-expiring before clearing")
 		}
 		var clean bool
 		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM audit_records ar JOIN executions e ON e.id=ar.execution_id JOIN verification_plans p ON p.id=e.plan_id WHERE ar.tenant_id=$1 AND p.repository_id=$2 AND ar.outcome=$3 AND ar.comparability='COMPARABLE' AND ar.details_json->>'scope_key'=$4 AND ar.created_at>(SELECT acknowledged_at FROM quarantines WHERE tenant_id=$1 AND repository_id=$2 AND scope_key=$4 AND status='ACKNOWLEDGED'))`, tenantID, repositoryID, domain.AuditNoMissObserved, scope).Scan(&clean); err != nil {

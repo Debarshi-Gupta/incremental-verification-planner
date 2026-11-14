@@ -10,6 +10,8 @@ analysis:
   max_changed_files_for_selective_plan: 500
   graph_staleness_minutes: 1440
   coverage_staleness_days: 30
+  history_window_days: 180
+  flake_minimum_comparable_observations: 5
   require_clean_dependency_resolution: true
 
 server:
@@ -22,6 +24,7 @@ execution:
   full_suite_argv: []
   timeout_seconds: 3600
   max_output_bytes: 1048576
+  failure_retry_count: 1
 
 modes:
   default: FAST_FEEDBACK
@@ -85,6 +88,10 @@ safety:
     - typecheck
     - secret-scan
     - dependency-audit
+  critical_path_patterns: []
+  documentation_path_patterns: ["**/*.md", "docs/**"]
+  reviewed_exclusions: []
+  hard_path_exceptions: []
   audit:
     enabled: true
     default_mode: SHADOW
@@ -93,6 +100,8 @@ safety:
     quarantine_on_confirmed_miss: true
     quarantine_hours: 168
     repeat_failed_test_count: 2
+    scheduled_cadence_hours: 24
+    acknowledgement_sla_hours: 24
 
 adapters:
   gradle:
@@ -100,23 +109,29 @@ adapters:
     wrapper_required: true
     unit_test_tasks: [test]
     integration_test_tasks: [integrationTest]
+    coverage_paths: []
   maven:
     enabled: true
     wrapper_preferred: true
     surefire_enabled: true
     failsafe_enabled: true
+    coverage_paths: []
   bazel:
     enabled: true
     use_configured_target_patterns: true
+    coverage_paths: []
   nx:
     enabled: true
     test_target_names: [test, e2e]
+    coverage_paths: []
   pytest:
     enabled: true
     config_file: pyproject.toml
+    coverage_paths: []
   jest:
     enabled: true
     config_discovery: true
+    coverage_paths: []
   generic:
     enabled: true
     test_units: []

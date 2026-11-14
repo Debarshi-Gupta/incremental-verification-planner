@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="0.011" timestamp="2026-09-20T09:14:02.118453" hostname="ci-runner-07">
+    <testcase classname="tests/test_api" file="tests/test_api.py" line="12" name="test_reads_health" time="0.003"/>
+  </testsuite>
+</testsuites>

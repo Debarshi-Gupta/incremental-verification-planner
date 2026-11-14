@@ -14,17 +14,29 @@ import (
 	"github.com/ivp/ivp/internal/adapters/native"
 )
 
-type Adapter struct{ native.Base }
+type Adapter struct {
+	native.Base
+	// capture is an injectable command seam for fixture tests. When nil (the
+	// default), every command runs through adapters.RunCapture unchanged.
+	capture func(ctx context.Context, root, executable string, args []string, limit int64) ([]byte, []byte, error)
+}
 
 func New() *Adapter {
-	return &Adapter{native.Base{Name: "pytest", Binary: "pytest", Caps: adapters.Capabilities{SelectableGranularity: "PYTEST_NODEID", DependencyPrecision: "TEST_FILE_AND_CONFIG", CoveragePrecision: "FILE", DiscoveryReliable: true, ResultFormats: []string{"junit-xml"}, SupportsCoverage: true, SupportsFiltering: true}}}
+	return &Adapter{Base: native.Base{Name: "pytest", Binary: "pytest", Caps: adapters.Capabilities{SelectableGranularity: "PYTEST_NODEID", DependencyPrecision: "TEST_FILE_AND_CONFIG", CoveragePrecision: "FILE", DiscoveryReliable: true, ResultFormats: []string{"junit-xml"}, SupportsCoverage: true, SupportsFiltering: true}}}
+}
+
+func (a *Adapter) runCapture(ctx context.Context, root, executable string, args []string, limit int64) ([]byte, []byte, error) {
+	if a.capture != nil {
+		return a.capture(ctx, root, executable, args, limit)
+	}
+	return adapters.RunCapture(ctx, root, executable, args, limit)
 }
 func (a *Adapter) ID() string { return "pytest" }
 func (a *Adapter) Detect(_ context.Context, root string) (adapters.Detection, error) {
 	return native.DetectFiles(root, "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini")
 }
 func (a *Adapter) Version(ctx context.Context, root string) (string, error) {
-	out, _, e := adapters.RunCapture(ctx, root, a.executable(), []string{"--version"}, 64<<10)
+	out, _, e := a.runCapture(ctx, root, a.executable(), []string{"--version"}, 64<<10)
 	if e != nil {
 		return "", e
 	}
@@ -54,7 +66,12 @@ func parseNodeIDs(root string, output []byte) adapters.DiscoveryResult {
 			continue
 		}
 		seen[line] = true
-		result.Units = append(result.Units, adapters.TestUnit{Key: filepath.ToSlash(line), DisplayName: line, Kind: "TEST_CASE", Module: filepath.ToSlash(filepath.Dir(file)), Paths: []string{filepath.ToSlash(file)}, SelectableGranularity: "PYTEST_NODEID", Filterable: true, Timeout: 10 * time.Minute, ReportPaths: []string{".ivp/reports/pytest.xml"}})
+		// ReportPaths are discovery-time globs: the materialized report is
+		// `.ivp/reports/pytest-<hash>.xml` (see Command's --junitxml), so a
+		// fixed name would never match. Glob matches the gradle/maven
+		// TEST-*.xml precedent; consumers expand via filepath.Glob and
+		// FreshReports staleness filtering (ADR 0003).
+		result.Units = append(result.Units, adapters.TestUnit{Key: filepath.ToSlash(line), DisplayName: line, Kind: "TEST_CASE", Module: filepath.ToSlash(filepath.Dir(file)), Paths: []string{filepath.ToSlash(file)}, SelectableGranularity: "PYTEST_NODEID", Filterable: true, Timeout: 10 * time.Minute, ReportPaths: []string{".ivp/reports/pytest*.xml"}})
 	}
 	if len(result.Units) == 0 {
 		result.Complete = false
@@ -69,7 +86,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 	}
 	args := append([]string(nil), req.Config.Options...)
 	args = append(args, "--collect-only", "-q")
-	out, _, e := adapters.RunCapture(ctx, req.Root, a.executable(), args, req.MaxOutputBytes)
+	out, _, e := a.runCapture(ctx, req.Root, a.executable(), args, req.MaxOutputBytes)
 	if e != nil {
 		return adapters.DiscoveryResult{Complete: false, Reasons: []string{"pytest collection failed"}}, e
 	}

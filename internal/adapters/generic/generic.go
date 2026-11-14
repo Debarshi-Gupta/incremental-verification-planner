@@ -16,6 +16,8 @@ import (
 
 type Adapter struct{}
 
+var _ adapters.Adapter = (*Adapter)(nil)
+
 func New() *Adapter         { return &Adapter{} }
 func (*Adapter) ID() string { return "generic" }
 func (*Adapter) Capabilities() adapters.Capabilities {
@@ -175,13 +177,6 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 		argv = append([]string(nil), req.Config.FullSuiteArgv...)
 		if len(argv) == 0 {
 			return adapters.ExecutionCommand{}, errors.New("generic full-suite argv is not configured")
-		}
-		for _, t := range req.Config.Targets {
-			if t.Mandatory {
-				continue
-			}
-			if len(t.Argv) > 0 { /* full command is explicitly configured and remains a single unit */
-			}
 		}
 	} else {
 		if len(req.TargetKeys) != 1 {

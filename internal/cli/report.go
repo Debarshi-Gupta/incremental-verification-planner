@@ -19,7 +19,10 @@ import (
 func renderReport(cmd *cobra.Command, name, format string) error {
 	data, err := os.ReadFile(name)
 	if err != nil {
-		return exitError{4, errors.New("report file is unavailable")}
+		// A missing local report file is invalid user input, not an API,
+		// authentication or policy failure: LLD 11.2 reserves code 4 for the
+		// latter, and code 2 for invalid configuration or input.
+		return exitError{2, errors.New("report file is unavailable")}
 	}
 	return renderReportData(cmd, data, format)
 }

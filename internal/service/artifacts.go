@@ -22,6 +22,7 @@ import (
 	"github.com/ivp/ivp/internal/persistence"
 	"github.com/ivp/ivp/internal/security"
 	"github.com/ivp/ivp/internal/telemetry"
+	"github.com/jackc/pgx/v5"
 )
 
 const DefaultArtifactRetention = 90 * 24 * time.Hour
@@ -78,6 +79,9 @@ func (m *ArtifactManager) defaults() (int64, time.Duration, time.Time, error) {
 
 func (m *ArtifactManager) Upload(ctx context.Context, tenantID, actorID, executionID uuid.UUID, mediaType string, src io.Reader) (api.ArtifactInfo, error) {
 	var info api.ArtifactInfo
+	if m == nil || m.DB == nil || m.Store == nil {
+		return info, fmt.Errorf("%w: artifact storage is not configured", api.ErrArtifactStorageUnavailable)
+	}
 	maxBytes, retention, now, err := m.defaults()
 	if err != nil {
 		return info, err
@@ -100,7 +104,7 @@ func (m *ArtifactManager) Upload(ctx context.Context, tenantID, actorID, executi
 		return info, err
 	}
 	if int64(len(raw)) > maxBytes {
-		return info, errors.New("artifact exceeds configured size limit")
+		return info, fmt.Errorf("%w: artifact exceeds configured size limit", api.ErrArtifactTooLarge)
 	}
 	if len(raw) == 0 {
 		return info, errors.New("empty report artifacts are not stored")
@@ -123,6 +127,9 @@ func (m *ArtifactManager) Upload(ctx context.Context, tenantID, actorID, executi
 		if m.Metrics != nil {
 			m.Metrics.ArtifactStoreError("upload")
 		}
+		if errors.Is(err, artifact.ErrUnavailable) {
+			return info, fmt.Errorf("%w: %v", api.ErrArtifactStorageUnavailable, err)
+		}
 		return info, err
 	}
 	expectedHash := sha256.Sum256(cleanBytes)
@@ -139,6 +146,9 @@ func (m *ArtifactManager) Upload(ctx context.Context, tenantID, actorID, executi
 		MediaType: object.MediaType, SizeBytes: object.Size, SHA256: object.SHA256, Sanitized: true, ExpiresAt: expiresAt, CreatedAt: now}
 	if err := m.DB.SaveArtifact(ctx, actorID, row); err != nil {
 		_ = m.Store.Delete(context.Background(), key)
+		if strings.Contains(err.Error(), "execution") {
+			return info, fmt.Errorf("%w: %v", api.ErrArtifactExecutionUnavailable, err)
+		}
 		return info, err
 	}
 	if m.Metrics != nil {
@@ -321,26 +331,37 @@ func sanitizeText(value string, maxBytes int) string {
 
 func (m *ArtifactManager) Open(ctx context.Context, tenantID, artifactID uuid.UUID) (api.ArtifactInfo, io.ReadCloser, error) {
 	var info api.ArtifactInfo
+	if m == nil || m.DB == nil || m.Store == nil {
+		return info, nil, fmt.Errorf("%w: artifact storage is not configured", api.ErrArtifactStorageUnavailable)
+	}
 	maxBytes, _, now, err := m.defaults()
 	if err != nil {
 		return info, nil, err
 	}
 	if tenantID == uuid.Nil || artifactID == uuid.Nil {
-		return info, nil, errors.New("tenant and artifact identifiers are required")
+		return info, nil, fmt.Errorf("%w: tenant and artifact identifiers are required", api.ErrArtifactUnavailable)
 	}
 	row, err := m.DB.GetArtifact(ctx, tenantID, artifactID)
 	if err != nil {
-		return info, nil, err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return info, nil, fmt.Errorf("%w: artifact metadata is not registered for this tenant", api.ErrArtifactUnavailable)
+		}
+		return info, nil, fmt.Errorf("%w: artifact metadata could not be read", api.ErrArtifactStorageUnavailable)
 	}
-	if row.ObjectKey != artifact.TenantKey(tenantID, artifactID) || !row.Sanitized || !row.ExpiresAt.After(now) || row.SizeBytes <= 0 || row.SizeBytes > maxBytes || !sha256Pattern.MatchString(strings.ToLower(row.SHA256)) || (row.MediaType != "application/json" && row.MediaType != "application/xml" && row.MediaType != "text/xml") {
-		return info, nil, errors.New("artifact is unavailable")
+	// The repository query is tenant scoped, and the object key is re-derived
+	// from the authenticated tenant so a mis-scoped row can never be served.
+	if row.TenantID != tenantID || row.ID != artifactID || row.ObjectKey != artifact.TenantKey(tenantID, artifactID) || !row.Sanitized || !row.ExpiresAt.After(now) || row.SizeBytes <= 0 || row.SizeBytes > maxBytes || !sha256Pattern.MatchString(strings.ToLower(row.SHA256)) || (row.MediaType != "application/json" && row.MediaType != "application/xml" && row.MediaType != "text/xml") {
+		return info, nil, fmt.Errorf("%w: artifact metadata is not retrievable by this tenant", api.ErrArtifactUnavailable)
 	}
 	reader, err := m.Store.Open(ctx, row.ObjectKey)
 	if err != nil {
 		if m.Metrics != nil {
 			m.Metrics.ArtifactStoreError("download")
 		}
-		return info, nil, err
+		if errors.Is(err, artifact.ErrNotFound) {
+			return info, nil, fmt.Errorf("%w: artifact object is absent from the store", api.ErrArtifactUnavailable)
+		}
+		return info, nil, fmt.Errorf("%w: artifact object could not be read", api.ErrArtifactStorageUnavailable)
 	}
 	verified := &integrityReadCloser{source: reader, expectedSize: row.SizeBytes, expectedSHA256: strings.ToLower(row.SHA256), hasher: sha256.New()}
 	return api.ArtifactInfo{ID: row.ID, MediaType: row.MediaType, SizeBytes: row.SizeBytes, SHA256: row.SHA256, Sanitized: row.Sanitized, ExpiresAt: row.ExpiresAt.Format(time.RFC3339Nano)}, verified, nil

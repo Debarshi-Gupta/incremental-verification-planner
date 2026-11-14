@@ -1,0 +1,11 @@
+py_library(
+    name = "math",
+    srcs = ["math.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "math_test",
+    srcs = ["math_test.py"],
+    deps = [":math"],
+)

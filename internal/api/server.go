@@ -147,13 +147,13 @@ type ExecutionUnitResult struct {
 	Summary            UnitResultSummary `json:"summary"`
 }
 type ResultRequest struct {
-	Outcome       domain.ExecutionOutcome `json:"outcome"`
-	ExitCode      *int                    `json:"exit_code,omitempty"`
-	CompletedAt   time.Time               `json:"completed_at"`
-	ElapsedMillis int64                   `json:"elapsed_ms"`
-	ComputeMillis int64                   `json:"compute_ms"`
-	Summary       ExecutionSummary        `json:"summary"`
-	UnitResults   []ExecutionUnitResult   `json:"unit_results,omitempty"`
+	Outcome       domain.ExecutionOutcome      `json:"outcome"`
+	ExitCode      *int                         `json:"exit_code,omitempty"`
+	CompletedAt   time.Time                    `json:"completed_at"`
+	ElapsedMillis int64                        `json:"elapsed_ms"`
+	ComputeMillis int64                        `json:"compute_ms"`
+	Summary       ExecutionSummary             `json:"summary"`
+	UnitResults   []ExecutionUnitResult        `json:"unit_results,omitempty"`
 	Coverage      []domain.CoverageObservation `json:"coverage,omitempty"`
 }
 type AuditRequest struct {
@@ -173,14 +173,14 @@ type PolicyRequest struct {
 	PolicyHash string          `json:"policy_hash"`
 }
 type AcceptedChangeRequest struct {
-	ChangeKey                string    `json:"change_key"`
-	StartedAt                time.Time `json:"started_at"`
-	AcceptedAt               time.Time `json:"accepted_at"`
-	AcceptedCorrect          *bool     `json:"accepted_correct"`
-	ComputeMillis            int64     `json:"compute_ms"`
-	CostMicrousd             int64     `json:"cost_microusd"`
-	HumanCorrectionMinutes   int64     `json:"human_correction_minutes"`
-	ExecutionID              string    `json:"execution_id,omitempty"`
+	ChangeKey              string    `json:"change_key"`
+	StartedAt              time.Time `json:"started_at"`
+	AcceptedAt             time.Time `json:"accepted_at"`
+	AcceptedCorrect        *bool     `json:"accepted_correct"`
+	ComputeMillis          int64     `json:"compute_ms"`
+	CostMicrousd           int64     `json:"cost_microusd"`
+	HumanCorrectionMinutes int64     `json:"human_correction_minutes"`
+	ExecutionID            string    `json:"execution_id,omitempty"`
 }
 type QuarantineRequest struct {
 	ScopeKey   string     `json:"scope_key"`
@@ -293,6 +293,15 @@ func dispatch(opts Options, operation string, defaultStatus int, idParam string,
 			status = http.StatusUnauthorized
 			writeError(w, r, &APIError{Status: status, Code: "UNAUTHENTICATED", Message: "authentication required"})
 			return
+		}
+		// A client-supplied tenant that differs from the authenticated tenant
+		// is a cross-tenant authorization attempt. The supplied value is
+		// ignored (the authenticated tenant always wins), but the attempt is
+		// counted so it can be alerted on (LLD 15.3).
+		if opts.Metrics != nil {
+			if supplied := strings.TrimSpace(r.Header.Get("X-Tenant-ID")); supplied != "" && supplied != principal.TenantID {
+				opts.Metrics.CrossTenantViolations.Inc()
+			}
 		}
 		if len(roles) > 0 && !security.HasRole(principal.Role, roles...) {
 			status = http.StatusForbidden
@@ -456,7 +465,8 @@ func validAPIOOutcome(outcome domain.ExecutionOutcome) bool {
 
 func validAuditExecutionOutcome(outcome domain.ExecutionOutcome) bool {
 	switch outcome {
-	case domain.OutcomeTargetedPass, domain.OutcomeFullVerificationPass, domain.OutcomeTargetedFail, domain.OutcomeFullVerificationFail:
+	case domain.OutcomeTargetedPass, domain.OutcomeFullVerificationPass, domain.OutcomeTargetedFail, domain.OutcomeFullVerificationFail,
+		domain.OutcomeAuditMiss, domain.OutcomeAuditPossibleMiss, domain.OutcomeAuditIncomparable:
 		return true
 	default:
 		return false

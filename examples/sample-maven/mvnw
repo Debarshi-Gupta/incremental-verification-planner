@@ -1,0 +1,5 @@
+#!/bin/sh
+# Minimal Maven wrapper stub for the IVP fixture repository.
+# The fixture is only inspected by IVP; no Maven distribution is required.
+echo "mvnw: maven distribution is not bundled with the fixture" >&2
+exit 1

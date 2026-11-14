@@ -50,9 +50,9 @@ func (a *Adapter) Version(ctx context.Context, root string) (string, error) {
 }
 
 type pom struct {
-	XMLName xml.Name
+	XMLName    xml.Name
 	ArtifactID string `xml:"artifactId"`
-	Modules struct {
+	Modules    struct {
 		Items []string `xml:"module"`
 	} `xml:"modules"`
 	Dependencies struct {
@@ -105,16 +105,34 @@ func hasFailsafe(p pom) bool {
 	}
 	return false
 }
+
+// Discovery reasons for providers that configuration switched off. They are
+// reported so an operator sees why no provider unit exists instead of a
+// silently smaller test inventory.
+const (
+	surefireDisabledReason = "Surefire disabled by configuration; no surefire test units declared"
+	failsafeDisabledReason = "Failsafe disabled by configuration; no failsafe verify units declared"
+)
+
 func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (adapters.DiscoveryResult, error) {
 	if e := a.ValidateConfig(req.Config); e != nil {
 		return adapters.DiscoveryResult{Complete: false, Reasons: []string{e.Error()}}, e
 	}
 	result := adapters.DiscoveryResult{Complete: true}
+	surefireEnabled := adapters.ProviderEnabled(req.Config.SurefireEnabled)
+	failsafeEnabled := adapters.ProviderEnabled(req.Config.FailsafeEnabled)
+	if !surefireEnabled {
+		result.Reasons = append(result.Reasons, surefireDisabledReason)
+	}
+	if !failsafeEnabled {
+		result.Reasons = append(result.Reasons, failsafeDisabledReason)
+	}
 	queue := []string{"."}
 	seen := map[string]bool{}
 	artifactModules := map[string][]string{}
 	moduleDependencies := map[string][]string{}
 	moduleSourcePathByKey := map[string]string{}
+	modulesDiscovered := 0
 	for len(queue) > 0 {
 		if e := ctx.Err(); e != nil {
 			return result, e
@@ -147,6 +165,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 			modulePath = ""
 		}
 		moduleSourcePathByKey[buildKey] = modulePath
+		modulesDiscovered++
 		if p.ArtifactID != "" {
 			artifactModules[p.ArtifactID] = append(artifactModules[p.ArtifactID], buildKey)
 		}
@@ -159,9 +178,11 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 		if keyPath == "" {
 			modulePaths = []string{"."}
 		}
-		base := keyPath + "#test"
-		result.Units = append(result.Units, adapters.TestUnit{Key: base, DisplayName: "Maven unit tests " + keyPath, Kind: "PROJECT_SUITE", Module: keyPath, Paths: modulePaths, BuildTargets: []string{buildKey}, SelectableGranularity: "MAVEN_MODULE_GOAL", Filterable: true, Timeout: 30 * time.Minute, ReportPaths: []string{filepath.ToSlash(filepath.Join(keyPath, "target", "surefire-reports", "TEST-*.xml"))}})
-		if hasFailsafe(p) {
+		if surefireEnabled {
+			base := keyPath + "#test"
+			result.Units = append(result.Units, adapters.TestUnit{Key: base, DisplayName: "Maven unit tests " + keyPath, Kind: "PROJECT_SUITE", Module: keyPath, Paths: modulePaths, BuildTargets: []string{buildKey}, SelectableGranularity: "MAVEN_MODULE_GOAL", Filterable: true, Timeout: 30 * time.Minute, ReportPaths: []string{filepath.ToSlash(filepath.Join(keyPath, "target", "surefire-reports", "TEST-*.xml"))}})
+		}
+		if failsafeEnabled && hasFailsafe(p) {
 			key := keyPath + "#verify"
 			result.Units = append(result.Units, adapters.TestUnit{Key: key, DisplayName: "Maven integration tests " + keyPath, Kind: "PROJECT_SUITE", Module: keyPath, Paths: modulePaths, BuildTargets: []string{buildKey}, SelectableGranularity: "MAVEN_MODULE_GOAL", Filterable: true, Timeout: 45 * time.Minute, ReportPaths: []string{filepath.ToSlash(filepath.Join(keyPath, "target", "failsafe-reports", "TEST-*.xml"))}})
 		}
@@ -181,7 +202,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 			queue = append(queue, joined)
 		}
 	}
-	if len(result.Units) == 0 {
+	if modulesDiscovered == 0 {
 		result.Complete = false
 		result.Reasons = append(result.Reasons, "no Maven modules discovered")
 	}
@@ -247,6 +268,12 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	module, goal := key[:ix], key[ix+1:]
 	if goal != "test" && goal != "verify" {
 		return adapters.ExecutionCommand{}, fmt.Errorf("unsupported Maven goal %q", goal)
+	}
+	if goal == "test" && !adapters.ProviderEnabled(req.Config.SurefireEnabled) {
+		return adapters.ExecutionCommand{}, errors.New("Surefire is disabled by configuration; refusing to materialize a surefire test goal")
+	}
+	if goal == "verify" && !adapters.ProviderEnabled(req.Config.FailsafeEnabled) {
+		return adapters.ExecutionCommand{}, errors.New("Failsafe is disabled by configuration; refusing to materialize a failsafe verify goal")
 	}
 	if module != "" {
 		if _, e := adapters.ResolveWithin(req.Root, module); e != nil {

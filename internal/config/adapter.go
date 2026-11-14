@@ -20,6 +20,15 @@ func (c Config) ToAdapterConfig(adapterID string, allowedExecutables []string) a
 		result.CoveragePaths = append([]string(nil), c.Adapters.Gradle.CoveragePaths...)
 	case "maven":
 		result.CoveragePaths = append([]string(nil), c.Adapters.Maven.CoveragePaths...)
+		// Provider toggles stay tri-state in the adapter view: an unset key
+		// (nil) keeps the adapter's default behavior and only an explicit
+		// false disables the provider.
+		if v := c.Adapters.Maven.SurefireEnabled; v != nil {
+			result.SurefireEnabled = boolPtr(*v)
+		}
+		if v := c.Adapters.Maven.FailsafeEnabled; v != nil {
+			result.FailsafeEnabled = boolPtr(*v)
+		}
 	case "bazel":
 		result.CoveragePaths = append([]string(nil), c.Adapters.Bazel.CoveragePaths...)
 	case "nx":

@@ -33,6 +33,7 @@ func (c *commands) audit(ctx context.Context, out io.Writer, cfg config.Config, 
 	if err != nil {
 		return exitError{2, err}
 	}
+	var sampleExecutionID uuid.UUID
 	if selectedRef == "latest" {
 		latest, latestErr := newestSelectiveRun(root)
 		if latestErr != nil {
@@ -42,10 +43,11 @@ func (c *commands) audit(ctx context.Context, out io.Writer, cfg config.Config, 
 			fmt.Fprintln(out, "No uploaded selective execution is available for audit; skipping this sample.")
 			return nil
 		}
-		if sample && !auditSampleSelected(latest.ExecutionID, cfg.Safety.Audit.SampleRate) {
-			fmt.Fprintln(out, "The latest selective execution was not selected by safety.audit.sample_rate; skipping this audit sample.")
-			return nil
-		}
+		// Sampling is decided only after the server plan is fetched so the rate
+		// can be selected by plan mode (RISK_BASED_CI uses
+		// modes.risk_based_ci.audit_sample_rate, everything else
+		// safety.audit.sample_rate).
+		sampleExecutionID = latest.ExecutionID
 		selectedRef = latest.ExecutionID.String()
 	}
 	client, err := newAPIClient(cfg)
@@ -65,6 +67,13 @@ func (c *commands) audit(ctx context.Context, out io.Writer, cfg config.Config, 
 	}
 	if plan.ID != selected.PlanID || plan.RepositoryID == uuid.Nil {
 		return exitError{6, errors.New("the selected report does not match a valid server plan")}
+	}
+	if sample && sampleExecutionID != uuid.Nil {
+		rate, source := auditSampleRate(cfg, plan.Mode)
+		if !auditSampleSelected(sampleExecutionID, rate) {
+			fmt.Fprintf(out, "The latest selective execution was not selected by %s; skipping this audit sample.\n", source)
+			return nil
+		}
 	}
 	_, record, err := loadIndex(root)
 	if err != nil {
@@ -327,6 +336,18 @@ func newestSelectiveRun(root string) (*localRun, error) {
 		}
 	}
 	return latest, nil
+}
+
+// auditSampleRate returns the audit sampling rate that governs the audited
+// plan's mode together with the configuration key that owns it.
+// RISK_BASED_CI executions are sampled by
+// modes.risk_based_ci.audit_sample_rate (LLD 7.2); every other mode by
+// safety.audit.sample_rate (LLD 10.2).
+func auditSampleRate(cfg config.Config, mode domain.PlanMode) (float64, string) {
+	if mode == domain.ModeRiskBasedCI {
+		return cfg.Modes.RiskBasedCI.AuditSampleRate, "modes.risk_based_ci.audit_sample_rate"
+	}
+	return cfg.Safety.Audit.SampleRate, "safety.audit.sample_rate"
 }
 
 func auditSampleSelected(executionID uuid.UUID, rate float64) bool {

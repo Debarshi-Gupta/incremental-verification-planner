@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="com.example.AppTest" tests="3" skipped="1" failures="0" errors="0" timestamp="2026-11-02T08:45:10.507Z" time="0.101">
+  <testcase name="transfers funds between accounts" classname="com.example.AppTest" time="0.041"/>
+  <testcase name="rejects overdraft" classname="com.example.AppTest" time="0.017"/>
+  <testcase name="legacy ledger migration (quarantined)" classname="com.example.AppTest" time="0.000">
+    <skipped/>
+  </testcase>
+</testsuite>

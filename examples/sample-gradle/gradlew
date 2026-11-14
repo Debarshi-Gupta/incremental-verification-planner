@@ -1,0 +1,4 @@
+#!/bin/sh
+# Minimal Gradle wrapper stub for the IVP fixture repository.
+# The fixture is only inspected by IVP; no Gradle distribution is downloaded.
+exec java -classpath gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain "$@"

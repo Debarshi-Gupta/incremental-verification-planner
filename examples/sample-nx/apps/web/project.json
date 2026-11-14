@@ -1,0 +1,25 @@
+{
+  "name": "web",
+  "root": "apps/web",
+  "sourceRoot": "apps/web/src",
+  "implicitDependencies": ["api"],
+  "targets": {
+    "lint": {
+      "executor": "@nx/linter:eslint",
+      "outputs": ["{options.outputFile}"],
+      "options": {}
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/apps/web"],
+      "options": {
+        "jestConfig": "apps/web/jest.config.js"
+      },
+      "configurations": {
+        "ci": {
+          "codeCoverage": true
+        }
+      }
+    }
+  }
+}

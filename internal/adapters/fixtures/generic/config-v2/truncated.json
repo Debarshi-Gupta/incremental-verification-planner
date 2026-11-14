@@ -1,0 +1,8 @@
+{
+  "numFailedTestSuites": 0,
+  "numFailedTests": 0,
+  "numPassedTests": 3,
+  "numTotalTests": 3,
+  "testResults": [
+    {
+      "name": "/home/ci/work/ivp-sample/tests/api.te

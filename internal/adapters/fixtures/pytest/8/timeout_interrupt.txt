@@ -1,0 +1,7 @@
+collected 6 items
+tests/test_api.py ....
+
+!!!! Interrupted: execution exceeded the 1200 second timeout !!!!
+
+======================== short test summary ========================
+INTERRUPTED tests/test_api.py

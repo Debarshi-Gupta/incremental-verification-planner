@@ -1,0 +1,3 @@
+PASS tests/unit/sum.test.js (1.204 s)
+RUNS tests/integration/api.test.js
+error: execution timed out after 120000ms; worker process killed

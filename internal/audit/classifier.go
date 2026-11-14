@@ -63,7 +63,10 @@ type Input struct {
 	FullFingerprint     Fingerprint
 	FailureOutputHash   string
 	QuarantineFor       time.Duration
-	Now                 time.Time
+	// FlakeMinimumComparableObservations gates FLAKY classification on the
+	// test's comparable observation count (LLD 7.3);0 fails closed.
+	FlakeMinimumComparableObservations int
+	Now                                time.Time
 }
 
 type Result struct {
@@ -97,8 +100,11 @@ func Classify(in Input) Result {
 	}
 	// A failing selected run followed by a failing full run does not establish
 	// a missed test. A miss is only possible when the selected verification
-	// passed but the equivalent full run found a failure.
-	if in.SelectedOutcome != domain.OutcomeTargetedPass && in.SelectedOutcome != domain.OutcomeFullVerificationPass {
+	// passed but the equivalent full run found a failure. An AUDIT_* outcome
+	// counts as the pass it was reclassified from, so a re-audit of an
+	// already-reclassified execution still reaches the miss analysis
+	// (ADR 0015).
+	if !domain.IsPassLikeOutcome(in.SelectedOutcome) {
 		if in.SelectedOutcome == domain.OutcomeTargetedFail || in.SelectedOutcome == domain.OutcomeFullVerificationFail {
 			result.Disposition = DispositionNoMiss
 			result.Record = makeRecord(in, domain.AuditNoMissObserved, nil)

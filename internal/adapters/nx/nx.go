@@ -15,10 +15,15 @@ import (
 	"github.com/ivp/ivp/internal/adapters/native"
 )
 
-type Adapter struct{ native.Base }
+type Adapter struct {
+	native.Base
+	// capture is an injectable command seam for fixture tests. When nil (the
+	// default), every command runs through adapters.RunCapture unchanged.
+	capture func(ctx context.Context, root, executable string, args []string, limit int64) ([]byte, []byte, error)
+}
 
 func New() *Adapter {
-	return &Adapter{native.Base{Name: "nx", Binary: "nx", Caps: adapters.Capabilities{SelectableGranularity: "NX_PROJECT_TARGET", DependencyPrecision: "NX_PROJECT_GRAPH", CoveragePrecision: "RUNNER_DECLARED", DiscoveryReliable: true, ResultFormats: []string{"junit-xml", "jest-json"}, SupportsCoverage: true, SupportsFiltering: false}}}
+	return &Adapter{Base: native.Base{Name: "nx", Binary: "nx", Caps: adapters.Capabilities{SelectableGranularity: "NX_PROJECT_TARGET", DependencyPrecision: "NX_PROJECT_GRAPH", CoveragePrecision: "RUNNER_DECLARED", DiscoveryReliable: true, ResultFormats: []string{"junit-xml", "jest-json"}, SupportsCoverage: true, SupportsFiltering: false}}}
 }
 func (a *Adapter) ID() string { return "nx" }
 func (a *Adapter) Detect(_ context.Context, root string) (adapters.Detection, error) {
@@ -32,7 +37,11 @@ func (a *Adapter) prefix(root string) (string, []string) {
 }
 func (a *Adapter) run(ctx context.Context, root string, args []string, limit int64) ([]byte, []byte, error) {
 	exe, prefix := a.prefix(root)
-	return adapters.RunCapture(ctx, root, exe, append(prefix, args...), limit)
+	argv := append(prefix, args...)
+	if a.capture != nil {
+		return a.capture(ctx, root, exe, argv, limit)
+	}
+	return adapters.RunCapture(ctx, root, exe, argv, limit)
 }
 func (a *Adapter) Version(ctx context.Context, root string) (string, error) {
 	out, stderr, e := a.run(ctx, root, []string{"--version"}, 64<<10)

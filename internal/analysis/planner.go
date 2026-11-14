@@ -39,6 +39,7 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 		now = now.UTC()
 	}
 	req.Now = now
+	evidence.ChangedFiles = ClassifyRiskLabels(evidence.ChangedFiles, policy)
 	evidence.ChangedFiles = canonicalChanges(evidence.ChangedFiles)
 	ttl := req.PlanTTL
 	if ttl <= 0 {
@@ -55,6 +56,11 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 		SelectedUnits:        []domain.PlanUnit{}, MandatoryUnits: []domain.PlanUnit{}, OmittedUnits: []domain.OmittedUnit{},
 		EscalationReasons: []domain.EscalationReason{}, HardRuleChecks: []domain.HardRuleCheck{}, EvidenceReferences: []domain.EvidenceReference{},
 	}
+	// Stage-9 explanation context (LLD 6.3 Stage 9): change summary, snapshot
+	// identifiers, and adapter/toolchain versions. Attached to every plan
+	// status, including escalations, so the omission/evidence audit trail is
+	// never lost (strategy 3.2 gap 1).
+	stage9 := stage9Context(plan, evidence, policy)
 	checks := make(map[domain.EscalationReasonCode]*domain.HardRuleCheck)
 	addCheck := func(code domain.EscalationReasonCode, triggered bool, detail string) {
 		if c, ok := checks[code]; ok {
@@ -155,6 +161,13 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	} else {
 		addCheck(domain.EscGraphIncomplete, false, "snapshot and impacted graph are complete")
 	}
+	// Omission audit trail for escalated plans: fullRequired records every
+	// discovered non-mandatory unit instead of clearing OmittedUnits
+	// (strategy 3.2 gap 1).
+	omissionAudit := func(selection []*candidate, escalated bool) omissionContext {
+		return omissionContext{units: evidence.Units, selection: selection, graphComplete: graphComplete,
+			reviewed: ReviewedExclusionKeys(policy), escalated: escalated}
+	}
 	if evidence.GraphHasConflicts {
 		addEscalation(domain.EscGraphConflict, "evidence contains contradictory impact edges")
 	} else {
@@ -168,7 +181,7 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	} else {
 		addCheck(domain.EscTooManyChangedFiles, false, "changed-file count is within policy")
 	}
-	if evidence.BroadRefactor {
+	if evidence.BroadRefactor || DetectBroadRefactor(evidence.ChangedFiles, policy) {
 		addEscalation(domain.EscTooManyChangedFiles, "change was classified as a broad refactor")
 	}
 	if policy.Quarantined {
@@ -176,20 +189,49 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	} else {
 		addCheck(domain.EscQuarantineActive, false, "selection scope is not quarantined")
 	}
+	// The request carries an environment fingerprint only when the caller can
+	// declare one; a declared-but-incomparable fingerprint means no
+	// environment-sensitive evidence in the snapshot can be trusted for this
+	// request, so verification falls back to the full suite (ADR 0013).
+	if req.EnvironmentFingerprint != "" {
+		if !evidence.ToolchainComparable {
+			addEscalation(domain.EscEnvironmentMismatch, "request environment fingerprint is not comparable with the indexed snapshot toolchain")
+		} else {
+			addCheck(domain.EscEnvironmentMismatch, false, "request environment fingerprint matches the indexed snapshot toolchain")
+		}
+	}
 	if len(evidence.ChangedFiles) == 0 {
 		addEscalation(domain.EscGraphIncomplete, "empty change set cannot justify selective verification")
 	}
 	for _, f := range evidence.ChangedFiles {
 		if matchAny(f.Path, policy.HardFullSuitePaths) || (f.OldPath != "" && matchAny(f.OldPath, policy.HardFullSuitePaths)) {
-			switch {
-			case isLockfilePath(f.Path) || (f.OldPath != "" && isLockfilePath(f.OldPath)):
-				addEscalation(domain.EscLockfileChange, "lockfile or dependency-resolution input changed: "+f.Path)
-			case isMigrationPath(f.Path) || (f.OldPath != "" && isMigrationPath(f.OldPath)):
-				addEscalation(domain.EscMigrationChange, "database migration changed: "+f.Path)
-			case isContractPath(f.Path) || (f.OldPath != "" && isContractPath(f.OldPath)):
-				addEscalation(domain.EscPublicContractChange, "public contract or schema changed: "+f.Path)
+			// Stage-2 global-impact classification (LLD 6.3 Stage 2) picks
+			// the specific escalation code; the HardFullSuitePaths gate and
+			// the lockfile > migration > contract precedence are unchanged.
+			category := globalImpactForChange(f, policy)
+			code := domain.EscConfigOrToolchainChange
+			detail := "build, test, toolchain, or global configuration changed: " + f.Path
+			switch category {
+			case CategoryLockfile:
+				code, detail = domain.EscLockfileChange, "lockfile or dependency-resolution input changed: "+f.Path
+			case CategoryDatabaseMigration:
+				code, detail = domain.EscMigrationChange, "database migration changed: "+f.Path
+			case CategorySchemaContract:
+				code, detail = domain.EscPublicContractChange, "public contract or schema changed: "+f.Path
 			default:
-				addEscalation(domain.EscConfigOrToolchainChange, "build, test, toolchain, or global configuration changed: "+f.Path)
+				if category != "" {
+					detail = fmt.Sprintf("build, test, toolchain, or global configuration changed (%s): %s", category, f.Path)
+				}
+			}
+			// ADR 0019 §3: a reviewed, org-scoped narrow exception suppresses
+			// only the matched path escalation and records an audit check with
+			// the review trail instead. The Stage-2 classification itself is
+			// still reported in the Stage-9 change summary, and the label
+			// escalations below (rule 4) are never exceptable.
+			if exception, ok := hardPathExceptionFor(policy, code, f); ok {
+				addCheck(code, false, fmt.Sprintf("hard-rule exception applied by %s on %s: %s", exception.Reviewer, exception.ReviewedAt, exception.Rationale))
+			} else {
+				addEscalation(code, detail)
 			}
 		}
 		for _, label := range f.DetectedRiskLabels {
@@ -202,7 +244,17 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 			}
 		}
 	}
-	impact := AnalyzeImpact(evidence.ChangedFiles, evidence.Nodes, evidence.Edges, policy, now, graphComplete, evidence.GraphMissingEdges, evidence.GraphHasConflicts, evidence.GraphHasCycles)
+	// LLD 13.3: the derived index (adjacency lists by edge type, connected
+	// target/module mappings, affected-target index) is derived once per
+	// snapshot and cached by snapshot hash and algorithm version instead of
+	// being rebuilt for every plan.
+	derived := DerivedIndexFor(evidence.Snapshot.TreeHash, evidence.Nodes, evidence.Edges)
+	impact := AnalyzeImpactIndexed(evidence.ChangedFiles, evidence.Nodes, evidence.Edges, derived, policy, now, graphComplete, evidence.GraphMissingEdges, evidence.GraphHasConflicts, evidence.GraphHasCycles)
+	if impact.Incomplete {
+		// A traversal bound was reached: the graph is incomplete and the plan
+		// escalates. The traversal is never silently truncated (LLD 13.3).
+		addEscalation(domain.EscGraphIncomplete, impact.IncompleteReason)
+	}
 	plan.EvidenceReferences = evidenceRefs(evidence, impact)
 	for _, entity := range impact.Entities {
 		for _, label := range entity.Labels {
@@ -225,6 +277,25 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 		addEscalation(domain.EscHighDependencyFanout, fmt.Sprintf("reverse dependency fanout %d exceeds limit %d", impact.ReverseFanout, policy.DependencyFanoutEscalation))
 	} else {
 		addCheck(domain.EscHighDependencyFanout, false, "reverse dependency fanout is within policy")
+	}
+	// LLD 6.3 rule 8, second trigger: the change affects too many build/test
+	// targets. The cap reuses max_changed_files_for_selective_plan (ADR 0018):
+	// one configured blast-radius limit guards both size triggers, so no new
+	// configuration key is introduced. Shares the TOO_MANY_CHANGED_FILES code
+	// with the other rule-8 triggers (Appendix A pins the vocabulary).
+	affectedTargets := 0
+	for _, n := range evidence.Nodes {
+		if !impact.ImpactedNodeIDs[n.ID] {
+			continue
+		}
+		if n.NodeType == domain.NodeBuildTarget || n.NodeType == domain.NodeTestTarget {
+			affectedTargets++
+		}
+	}
+	if policy.MaxChangedFilesForSelectivePlan > 0 && affectedTargets > policy.MaxChangedFilesForSelectivePlan {
+		addEscalation(domain.EscTooManyChangedFiles, fmt.Sprintf("affected target count %d exceeds limit %d", affectedTargets, policy.MaxChangedFilesForSelectivePlan))
+	} else {
+		addCheck(domain.EscTooManyChangedFiles, false, fmt.Sprintf("affected target count %d is within policy", affectedTargets))
 	}
 	if len(evidence.ChangedFiles) > 0 && allDocumentation(evidence.ChangedFiles, policy.DocumentationPathPatterns) {
 		evidence.DocumentationOnly = true
@@ -281,10 +352,18 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	} else {
 		addCheck(domain.EscMandatoryCheckUnresolved, false, "all configured mandatory check IDs were resolved")
 	}
+	// Deterministic emission order: map iteration over candidateByKey must not
+	// leak into escalation detail strings (plan output has to be reproducible
+	// across runs for identical inputs).
+	unrunnableMandatory := make([]string, 0)
 	for key, c := range candidateByKey {
 		if c.mandatory && (!c.unit.Selectable || c.unit.Adapter == "") {
-			addEscalation(domain.EscMandatoryCheckUnresolved, "mandatory check is not safely runnable at the discovered granularity: "+key)
+			unrunnableMandatory = append(unrunnableMandatory, key)
 		}
+	}
+	sort.Strings(unrunnableMandatory)
+	for _, key := range unrunnableMandatory {
+		addEscalation(domain.EscMandatoryCheckUnresolved, "mandatory check is not safely runnable at the discovered granularity: "+key)
 	}
 
 	coverageFresh := false
@@ -330,7 +409,7 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	if req.Mode == domain.ModeFull {
 		finalizeChecks(&plan, checks)
 		plan.Explanation = "FULL mode was explicitly requested. The local executor must run the configured full-suite fallback. " + explanationSuffix(plan)
-		return fullRequired(plan, candidateByKey, policy, "FULL mode requested"), nil
+		return fullRequired(plan, candidateByKey, policy, "FULL mode requested", stage9, omissionAudit(nil, true)), nil
 	}
 
 	threshold := coverageThreshold(risk.Level, policy)
@@ -340,11 +419,22 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	} else {
 		addCheck(domain.EscNoTestsSelected, false, "at least one runnable unit is selected or the change is documentation-only")
 	}
-	selectionConfidence := calculateConfidence(req, evidence, impact, selection, weightedCoverage, mappedWeight(impact.Entities, candidates))
+	// LLD 4.3: binary changes without identified consumers lower selection
+	// confidence; the penalty is applied to the computed confidence so the
+	// existing LOW_SELECTION_CONFIDENCE rule decides the outcome.
+	binaryPenalty := 1.0
+	binaryUnknown := binaryChangesWithoutIdentifiedConsumers(evidence.ChangedFiles, impact.Entities)
+	if len(binaryUnknown) > 0 {
+		binaryPenalty = binaryConfidenceFactor
+	}
+	selectionConfidence := calculateConfidence(req, evidence, impact, selection, weightedCoverage, mappedWeight(impact.Entities, candidates), binaryPenalty)
 	plan.SelectionConfidence = selectionConfidence
 	plan.WeightedCoverage = weightedCoverage
 	plan.EstimatedDurationMillis = selectedMillis
 	plan.EstimatedComputeMillis = selectedMillis
+	selectedP50, selectedP95 := durationBounds(selection, policy)
+	plan.EstimatedDurationP50Millis = selectedP50
+	plan.EstimatedDurationP95Millis = selectedP95
 
 	if coverageImpossible || weightedCoverage+1e-9 < threshold {
 		addEscalation(domain.EscLowWeightedCoverage, fmt.Sprintf("estimated weighted impact coverage %.4f is below required %.4f", weightedCoverage, threshold))
@@ -352,7 +442,11 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 		addCheck(domain.EscLowWeightedCoverage, false, fmt.Sprintf("estimated weighted coverage %.4f meets required %.4f", weightedCoverage, threshold))
 	}
 	if selectionConfidence+1e-9 < policy.MinimumSelectionConfidence {
-		addEscalation(domain.EscLowSelectionConfidence, fmt.Sprintf("selection confidence %.4f is below required %.4f", selectionConfidence, policy.MinimumSelectionConfidence))
+		detail := fmt.Sprintf("selection confidence %.4f is below required %.4f", selectionConfidence, policy.MinimumSelectionConfidence)
+		if len(binaryUnknown) > 0 {
+			detail += "; binary change without build-metadata consumers lowers confidence: " + strings.Join(binaryUnknown, ", ")
+		}
+		addEscalation(domain.EscLowSelectionConfidence, detail)
 	} else {
 		addCheck(domain.EscLowSelectionConfidence, false, fmt.Sprintf("selection confidence %.4f meets required %.4f", selectionConfidence, policy.MinimumSelectionConfidence))
 	}
@@ -365,24 +459,34 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	if hasTriggered(checks) {
 		finalizeChecks(&plan, checks)
 		plan.Explanation = "Selective verification was not justified by the current evidence; the local executor must run the configured full-suite fallback. " + explanationSuffix(plan)
-		return fullRequired(plan, candidateByKey, policy, "one or more hard safety conditions triggered"), nil
+		return fullRequired(plan, candidateByKey, policy, "one or more hard safety conditions triggered", stage9, omissionAudit(selection, true)), nil
 	}
-	if !allDurationsKnown(selection) || req.FullSuiteEstimateMillis <= 0 || selectedMillis >= int64(float64(req.FullSuiteEstimateMillis)*policy.MaxSelectiveRuntimeFraction) {
-		addEscalation(domain.EscPlanEconomicallyUnhelpful, "selected verification has no proven runtime advantage within the configured safety fraction")
+	// LLD 6.3 rule 11: selection is uneconomic when the conservative estimate
+	// is within the configured fraction of the full suite, or when the P50-P95
+	// uncertainty interval overlaps the full-suite runtime without a proven
+	// advantage. With per-unit samples absent the interval collapses to the
+	// point estimate, so behavior matches the pre-interval gate.
+	fullSuiteCeiling := int64(float64(req.FullSuiteEstimateMillis) * policy.MaxSelectiveRuntimeFraction)
+	intervalOverlapsFullSuite := req.FullSuiteEstimateMillis > 0 &&
+		selectedP50 <= int64(req.FullSuiteEstimateMillis) && selectedP95 >= int64(req.FullSuiteEstimateMillis)
+	if !allDurationsKnown(selection) || req.FullSuiteEstimateMillis <= 0 || selectedMillis >= fullSuiteCeiling || intervalOverlapsFullSuite {
+		addEscalation(domain.EscPlanEconomicallyUnhelpful, fmt.Sprintf(
+			"selected verification has no proven runtime advantage: estimated runtime P50=%dms P95=%dms vs full-suite estimate %dms within fraction %.2f; an uncertainty interval overlapping the full-suite runtime makes selection uneconomic",
+			selectedP50, selectedP95, req.FullSuiteEstimateMillis, policy.MaxSelectiveRuntimeFraction))
 		finalizeChecks(&plan, checks)
 		plan.Explanation = "Selective verification is not economically justified by conservative runtime estimates; the local executor must run the configured full-suite fallback. " + explanationSuffix(plan)
-		return fullRequired(plan, candidateByKey, policy, "runtime advantage is not established"), nil
+		return fullRequired(plan, candidateByKey, policy, "runtime advantage is not established", stage9, omissionAudit(selection, true)), nil
 	}
 	if evidence.Snapshot.WorktreeHash != req.CurrentWorktreeHash {
 		addEscalation(domain.EscWorktreeMutated, "worktree fingerprint changed after planning")
 		finalizeChecks(&plan, checks)
-		return fullRequired(plan, candidateByKey, policy, "worktree mutated during planning"), nil
+		return fullRequired(plan, candidateByKey, policy, "worktree mutated during planning", stage9, omissionAudit(selection, true)), nil
 	}
 
 	plan.Status = domain.PlanReady
 	plan.SelectedUnits = makePlanUnits(selection, impact.Entities, false)
 	plan.MandatoryUnits = mandatoryPlanUnits(candidateByKey)
-	plan.OmittedUnits = omissions(evidence.Units, selection, candidateByKey)
+	plan.OmittedUnits = omissions(evidence.Units, selection, candidateByKey, graphComplete, ReviewedExclusionKeys(policy), false)
 	finalizeChecks(&plan, checks)
 	modeNote := "A TARGETED_PASS applies only to the selected checks and says nothing about unselected tests."
 	if req.Mode == domain.ModeObserve {
@@ -391,8 +495,9 @@ func CreatePlan(req domain.PlanRequest, evidence EvidenceSnapshot, policy domain
 	if req.Mode == domain.ModeFastFeedback {
 		modeNote += " Final CI still requires the configured full suite."
 	}
-	plan.Explanation = fmt.Sprintf("Selected %d of %d discovered units for %s at risk %s (%d/100); estimated weighted impact coverage %.4f and selection confidence %.4f. %s %s",
-		len(plan.SelectedUnits), len(evidence.Units), req.Mode, risk.Level, risk.Score, weightedCoverage, selectionConfidence, modeNote, explanationSuffix(plan))
+	plan.Explanation = fmt.Sprintf("Selected %d of %d discovered units for %s at risk %s (%d/100); estimated weighted impact coverage %.4f and selection confidence %.4f; estimated runtime P50 %d ms to P95 %d ms. %s %s %s",
+		len(plan.SelectedUnits), len(evidence.Units), req.Mode, risk.Level, risk.Score, weightedCoverage, selectionConfidence,
+		plan.EstimatedDurationP50Millis, plan.EstimatedDurationP95Millis, modeNote, stage9, explanationSuffix(plan))
 	return plan, nil
 }
 
@@ -400,6 +505,7 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 	byKey := make(map[string]*candidate, len(evidence.Units))
 	unitByNodeKey := make(map[string][]*candidate)
 	unitByStableKey := make(map[string]*candidate)
+	unitsBySourcePath := make(map[string][]*candidate)
 	staleCoverage, invalidCoverage := false, false
 	for _, unit := range evidence.Units {
 		if err := domain.ValidateTestUnit(unit, evidence.Snapshot.ID); err != nil {
@@ -423,6 +529,11 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 		if unit.ModuleKey != "" {
 			unitByNodeKey[unit.ModuleKey] = append(unitByNodeKey[unit.ModuleKey], c)
 		}
+		for _, sourcePath := range unit.SourcePaths {
+			if sourcePath != "" {
+				unitsBySourcePath[sourcePath] = append(unitsBySourcePath[sourcePath], c)
+			}
+		}
 		if c.mandatory {
 			c.reasons[domain.ReasonMandatoryPolicyCheck] = true
 			c.selected = unit.Selectable
@@ -444,6 +555,15 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 		if strings.HasPrefix(key, "unit:") {
 			if c := unitByStableKey[strings.TrimPrefix(key, "unit:")]; c != nil {
 				found = append(found, c)
+			}
+		}
+		// File-node keys resolve to the units that declare the file as a
+		// source path. Convention edges (COLOCATED_WITH, CONTRACT_CONSUMER)
+		// are file-anchored, so their endpoints must reach owning units
+		// (ADR 0013).
+		if strings.HasPrefix(key, "file:") {
+			if owned := unitsBySourcePath[strings.TrimPrefix(key, "file:")]; len(owned) > 0 {
+				found = append(found, owned...)
 			}
 		}
 		found = append(found, unitByNodeKey[key]...)
@@ -510,8 +630,24 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 				c.dependencyGain = math.Max(c.dependencyGain, math.Min(0.05, edge.Confidence*0.05))
 			}
 		}
+		// A changed public contract expands the candidate set to its consumers
+		// (LLD 17.4). CONTRACT_CONSUMER edges never propagate impact, so the
+		// consumer side is reached here from the impacted schema side.
+		if edge.EdgeType == domain.EdgeContractConsumer && impact.ImpactedNodeIDs[to.ID] && !impact.ImpactedNodeIDs[from.ID] {
+			for _, c := range unitForNode(from.StableKey) {
+				c.reasons[domain.ReasonPublicContractConsumer] = true
+				for _, entity := range entityForNode(to) {
+					addCandidateCoverage(c, entity.StableKey, edge.Confidence*0.65*nodeConfidence(from)*nodeConfidence(to), domain.ReasonAffectedBuildTarget)
+				}
+				c.dependencyGain = math.Max(c.dependencyGain, math.Min(0.05, edge.Confidence*0.05))
+			}
+		}
 	}
 
+	// LLD 4.3: binary files cannot use line-level coverage. The changed
+	// paths that git reported as binary are tracked so that coverage over
+	// them is never treated as a line-level mapping.
+	binaryPaths := binaryChangedPaths(evidence.ChangedFiles)
 	for _, obs := range evidence.Coverage {
 		if err := domain.ValidateCoverageObservation(obs); err != nil {
 			invalidCoverage = true
@@ -532,14 +668,21 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 			continue
 		}
 		for _, entity := range entitiesForCoverage(obs, evidence.Nodes, entityByPath, impact.Entities) {
-			if obs.Precision == domain.CoverageLine && !changedLineOverlap(obs, evidence.ChangedFiles, entity.Path) {
+			// LLD 4.3: binary files cannot use line-level coverage, so an
+			// observation over a binary path is only usable at file
+			// granularity, never as a line-level mapping.
+			precision := obs.Precision
+			if precision == domain.CoverageLine && binaryPaths[entity.Path] {
+				precision = domain.CoverageFile
+			}
+			if precision == domain.CoverageLine && !changedLineOverlap(obs, evidence.ChangedFiles, entity.Path) {
 				continue
 			}
-			quality := freshness * obs.EvidenceConfidence * precisionFactor(obs.Precision)
+			quality := freshness * obs.EvidenceConfidence * precisionFactor(precision)
 			if obs.SuiteLevel && !obs.TestSpecific {
 				quality = math.Min(quality, 0.65)
 			}
-			addCandidateCoverage(c, entity.StableKey, quality, reasonForPrecision(obs.Precision))
+			addCandidateCoverage(c, entity.StableKey, quality, reasonForPrecision(precision))
 		}
 	}
 
@@ -648,6 +791,38 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 		}
 	}
 
+	reviewed := ReviewedExclusionKeys(policy)
+	// Stage-4 candidate union: integration/E2E tests configured for affected
+	// services/modules (LLD line 456) contribute the INTEGRATION_BOUNDARY
+	// reason with bounded dependency gain and deliberately moderate coverage
+	// quality, so this evidence alone cannot satisfy a coverage threshold.
+	changedPaths := make(map[string]bool, len(evidence.ChangedFiles))
+	for _, f := range evidence.ChangedFiles {
+		changedPaths[f.Path] = true
+		if f.OldPath != "" {
+			changedPaths[f.OldPath] = true
+		}
+	}
+	impacted := make(map[string]bool, len(impact.ImpactedNodeIDs))
+	for _, n := range evidence.Nodes {
+		if impact.ImpactedNodeIDs[n.ID] && n.StableKey != "" {
+			impacted[n.StableKey] = true
+		}
+	}
+	for _, c := range byKey {
+		if !IsIntegrationBoundaryUnit(c.unit) || !unitAffectedByImpact(c.unit, impacted, changedPaths) {
+			continue
+		}
+		c.reasons[domain.ReasonIntegrationBoundary] = true
+		c.dependencyGain = math.Max(c.dependencyGain, 0.04)
+		for _, entity := range impact.Entities {
+			if entity.Path == "" {
+				continue
+			}
+			addCandidateCoverage(c, entity.StableKey, 0.5, domain.ReasonIntegrationBoundary)
+		}
+	}
+
 	all := make([]*candidate, 0, len(byKey))
 	for _, c := range byKey {
 		if c.mandatory {
@@ -659,11 +834,33 @@ func buildCandidates(req domain.PlanRequest, evidence EvidenceSnapshot, policy d
 		if c.unit.Adapter == "" {
 			continue
 		}
+		// A reviewed exclusion keeps the unit out of the selectable pool; a
+		// mandatory gate is never silenced by an exclusion (ADR 0013).
+		if len(reviewed) > 0 && reviewed[c.unit.StableKey] && !c.mandatory {
+			continue
+		}
 		c.utility = candidateUtility(c, policy)
 		all = append(all, c)
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].unit.StableKey < all[j].unit.StableKey })
 	return all, byKey, staleCoverage, invalidCoverage
+}
+
+// unitAffectedByImpact reports whether an integration-boundary unit belongs to
+// an affected service/module: its own unit node, target ref, or module key is
+// impacted, or one of its declared source paths changed (LLD line 456).
+func unitAffectedByImpact(unit domain.TestUnit, impacted map[string]bool, changedPaths map[string]bool) bool {
+	for _, key := range []string{"unit:" + unit.StableKey, unit.TargetRef, unit.ModuleKey} {
+		if key != "" && impacted[key] {
+			return true
+		}
+	}
+	for _, sourcePath := range unit.SourcePaths {
+		if changedPaths[sourcePath] {
+			return true
+		}
+	}
+	return false
 }
 
 func greedySetCover(candidates []*candidate, entities []ImpactEntity, target float64, policy domain.Policy) ([]*candidate, float64, int64, bool) {
@@ -761,7 +958,7 @@ func candidateReliability(c *candidate) float64 {
 	return reliability
 }
 
-func calculateConfidence(req domain.PlanRequest, evidence EvidenceSnapshot, impact ImpactResult, selected []*candidate, weightedCoverage, mapped float64) float64 {
+func calculateConfidence(req domain.PlanRequest, evidence EvidenceSnapshot, impact ImpactResult, selected []*candidate, weightedCoverage, mapped float64, binaryPenalty float64) float64 {
 	graph := 0.0
 	if evidence.GraphComplete && evidence.Snapshot.IsComplete && !evidence.GraphMissingEdges {
 		graph = 1
@@ -826,15 +1023,116 @@ func calculateConfidence(req domain.PlanRequest, evidence EvidenceSnapshot, impa
 		}
 	}
 	value := 0.20*graph + 0.15*edge + 0.15*freshness + 0.10*precision + 0.20*clampFloat(mapped, 0, 1) + 0.05*historyFactor + 0.10*environment + 0.05*critical
+	// LLD 4.3: a binary change whose consumers are not identified by build
+	// metadata lowers selection confidence, because line-level coverage is
+	// unavailable for binary content.
+	if binaryPenalty < 1 {
+		value *= binaryPenalty
+	}
 	return clampFloat(value, 0, 1)
+}
+
+// binaryConfidenceFactor is the multiplier applied to selection confidence
+// when a binary change's consumers are unknown (LLD 4.3). The lowered
+// confidence then falls below the policy threshold in the normal case, so
+// the plan escalates instead of claiming selective verification.
+const binaryConfidenceFactor = 0.75
+
+// binaryChangedPaths returns the changed-file paths that git reported as
+// binary, on both sides of a rename (LLD 4.3).
+func binaryChangedPaths(changes []domain.ChangedFile) map[string]bool {
+	var out map[string]bool
+	for _, change := range changes {
+		if !change.IsBinary {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		if change.Path != "" {
+			out[change.Path] = true
+		}
+		if change.OldPath != "" {
+			out[change.OldPath] = true
+		}
+	}
+	return out
+}
+
+// binaryChangesWithoutIdentifiedConsumers returns the binary changed files
+// whose consumers are not identified by build metadata. A binary file whose
+// dependency-graph consumers are known keeps its selection confidence; an
+// unknown one does not (LLD 4.3).
+func binaryChangesWithoutIdentifiedConsumers(changes []domain.ChangedFile, entities []ImpactEntity) []string {
+	identified := map[string]bool{}
+	for _, entity := range entities {
+		if entity.ReverseFanout > 0 {
+			identified[entity.Path] = true
+		}
+	}
+	var unknown []string
+	for _, change := range changes {
+		if !change.IsBinary {
+			continue
+		}
+		known := (change.Path != "" && identified[change.Path]) || (change.OldPath != "" && identified[change.OldPath])
+		if !known {
+			unknown = append(unknown, change.Path)
+		}
+	}
+	return unknown
+}
+
+// planExecutionTier maps a selected candidate to its LLD Stage-8 ordering
+// tier (planner.go ordering, LLD 6.3 Stage 8):
+//  0. mandatory gates;
+//  1. checks with the highest expected fault-detection value per second
+//     (utility ranks within the tier);
+//  2. direct tests covering changed lines/symbols;
+//  3. high-risk dependency consumers;
+//  4. integration/E2E tests;
+//  5. remaining selected tests.
+func planExecutionTier(c *candidate, entities []ImpactEntity) int {
+	switch {
+	case c.mandatory:
+		return 0
+	case c.unit.UnitType == domain.UnitCheck:
+		return 1
+	case c.direct:
+		return 2
+	case isHighRiskDependencyConsumer(c, entities):
+		return 3
+	case c.reasons[domain.ReasonIntegrationBoundary]:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// isHighRiskDependencyConsumer reports whether a candidate consumes a
+// high-risk dependency: it was reached through a reverse-dependency or
+// public-contract consumer edge and its coverage includes at least one
+// critical impacted entity. Consumers of ordinary entities stay in the
+// remaining-tests tier (LLD 6.3 Stage 8, order 4).
+func isHighRiskDependencyConsumer(c *candidate, entities []ImpactEntity) bool {
+	if !c.reasons[domain.ReasonReverseDependencyConsumer] && !c.reasons[domain.ReasonPublicContractConsumer] {
+		return false
+	}
+	for _, e := range entities {
+		if e.Critical && c.coverage[e.StableKey] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func makePlanUnits(selected []*candidate, entities []ImpactEntity, fallback bool) []domain.PlanUnit {
 	selected = append([]*candidate(nil), selected...)
 	sort.SliceStable(selected, func(i, j int) bool {
 		a, b := selected[i], selected[j]
-		if a.mandatory != b.mandatory {
-			return a.mandatory
+		ta, tb := planExecutionTier(a, entities), planExecutionTier(b, entities)
+		if ta != tb {
+			return ta < tb
 		}
 		if a.utility != b.utility {
 			return a.utility > b.utility
@@ -900,7 +1198,7 @@ func mandatoryPlanUnits(byKey map[string]*candidate) []domain.PlanUnit {
 	return makePlanUnits(selected, nil, false)
 }
 
-func omissions(units []domain.TestUnit, selected []*candidate, byKey map[string]*candidate) []domain.OmittedUnit {
+func omissions(units []domain.TestUnit, selected []*candidate, byKey map[string]*candidate, graphComplete bool, reviewed map[string]bool, escalated bool) []domain.OmittedUnit {
 	chosen := make(map[string]bool, len(selected))
 	for _, c := range selected {
 		chosen[c.unit.StableKey] = true
@@ -920,12 +1218,27 @@ func omissions(units []domain.TestUnit, selected []*candidate, byKey map[string]
 		case c == nil:
 			code = domain.OmitNotInActiveAdapterScope
 			explanation = "unit is outside the active adapter discovery scope; this is not proof of irrelevance"
+		case len(reviewed) > 0 && reviewed[unit.StableKey]:
+			code = domain.OmitExcludedByReviewedPolicy
+			explanation = "unit is excluded by a reviewed policy entry; this is not proof of irrelevance"
 		case len(c.coverage) == 0 && !c.direct:
-			code = domain.OmitNoImpactEdgeObserved
+			if graphComplete {
+				code = domain.OmitOutsideAffectedTargets
+				explanation = "unit has no observed edge to any affected target in a complete graph; this is not proof of irrelevance"
+			} else {
+				code = domain.OmitNoImpactEdgeObserved
+				explanation = "graph evidence is incomplete, so no impact edge could be observed; this is not proof of irrelevance"
+			}
 		case c.selected:
 			code = domain.OmitCoverageAlreadySatisfied
 		case c.utility > 0:
 			code = domain.OmitLowerMarginalCoveragePerCost
+		}
+		if escalated {
+			// An escalated plan never ran the selective recommendation; every
+			// recorded omission keeps its evidence-based reason but is
+			// explicitly labelled as audit trail, not as a selection decision.
+			explanation = "selective recommendation was escalated to full verification; recorded to preserve the omission audit trail: " + explanation
 		}
 		out = append(out, domain.OmittedUnit{StableKey: unit.StableKey, ReasonCodes: []domain.OmissionReasonCode{code}, Explanation: explanation})
 	}
@@ -933,11 +1246,23 @@ func omissions(units []domain.TestUnit, selected []*candidate, byKey map[string]
 	return out
 }
 
-func fullRequired(plan domain.VerificationPlan, byKey map[string]*candidate, policy domain.Policy, explanation string) domain.VerificationPlan {
+// omissionContext carries the evidence fullRequired needs to record the
+// omission audit trail when a plan escalates: escalating must not clear
+// OmittedUnits (strategy 3.2 gap 1, LLD 6.3 Stage 9 "every omitted candidate
+// or category with omission reason").
+type omissionContext struct {
+	units         []domain.TestUnit
+	selection     []*candidate
+	graphComplete bool
+	reviewed      map[string]bool
+	escalated     bool
+}
+
+func fullRequired(plan domain.VerificationPlan, byKey map[string]*candidate, policy domain.Policy, explanation, stage9 string, audit omissionContext) domain.VerificationPlan {
 	plan.Status = domain.PlanFullRequired
 	plan.SelectedUnits = nil
 	plan.MandatoryUnits = mandatoryPlanUnits(byKey)
-	plan.OmittedUnits = nil
+	plan.OmittedUnits = omissions(audit.units, audit.selection, byKey, audit.graphComplete, audit.reviewed, audit.escalated)
 	fallback := domain.PlanUnit{UnitID: uuid.New(), StableKey: "FULL_SUITE", UnitType: domain.UnitProjectSuite,
 		ReasonCodes: []domain.SelectedReasonCode{domain.ReasonFallbackFullSuite}, EstimatedDurationMillis: 0,
 		Mandatory: true, TargetRef: policy.FullSuiteTargetRef, SelectionGranularity: "PROJECT_SUITE",
@@ -948,6 +1273,13 @@ func fullRequired(plan domain.VerificationPlan, byKey map[string]*candidate, pol
 			plan.Explanation = explanation
 		} else {
 			plan.Explanation += " " + explanation
+		}
+	}
+	if stage9 != "" {
+		if plan.Explanation == "" {
+			plan.Explanation = stage9
+		} else {
+			plan.Explanation += " " + stage9
 		}
 	}
 	if plan.EscalationReasons == nil {
@@ -963,6 +1295,61 @@ func finalizeChecks(plan *domain.VerificationPlan, checks map[domain.EscalationR
 	}
 	sort.Slice(plan.HardRuleChecks, func(i, j int) bool { return plan.HardRuleChecks[i].Code < plan.HardRuleChecks[j].Code })
 	sort.Slice(plan.EscalationReasons, func(i, j int) bool { return plan.EscalationReasons[i].Code < plan.EscalationReasons[j].Code })
+}
+
+// stage9Context renders the Stage-9 explanation context mandated by LLD 6.3
+// Stage 9: change summary, snapshot identifiers, and adapter/toolchain
+// versions. It is deterministic for identical normalized inputs (change paths
+// arrive pre-sorted from canonicalChanges, capability keys are sorted here)
+// and is attached to every plan status so escalated plans explain the same
+// evidence READY plans do.
+func stage9Context(plan domain.VerificationPlan, evidence EvidenceSnapshot, policy domain.Policy) string {
+	counts := make(map[domain.ChangeStatus]int, 6)
+	paths := make([]string, 0, len(evidence.ChangedFiles))
+	impacts := make([]string, 0, len(evidence.ChangedFiles))
+	for _, f := range evidence.ChangedFiles {
+		counts[f.Status]++
+		paths = append(paths, f.Path)
+		if category := ClassifyGlobalImpactFile(f, policy); category != "" {
+			impacts = append(impacts, string(category)+"="+f.Path)
+		}
+	}
+	shown, ellipsis := paths, ""
+	if len(shown) > 5 {
+		shown, ellipsis = shown[:5], ", ..."
+	}
+	impactNote := "global-impact files: none"
+	if len(impacts) > 0 {
+		impactShown, impactEllipsis := impacts, ""
+		if len(impactShown) > 6 {
+			impactShown, impactEllipsis = impactShown[:6], ", ..."
+		}
+		impactNote = "global-impact files: " + strings.Join(impactShown, ", ") + impactEllipsis
+	}
+	changeSummary := fmt.Sprintf("change summary: %d file(s) added=%d modified=%d deleted=%d renamed=%d copied=%d type-changed=%d [%s%s]; %s",
+		len(evidence.ChangedFiles), counts[domain.ChangeAdded], counts[domain.ChangeModified], counts[domain.ChangeDeleted],
+		counts[domain.ChangeRenamed], counts[domain.ChangeCopied], counts[domain.ChangeTypeChanged],
+		strings.Join(shown, ", "), ellipsis, impactNote)
+	ids := fmt.Sprintf("snapshot identifiers: snapshot=%s base=%s head=%s worktree=%s",
+		plan.SnapshotID, plan.BaseSHA, plan.HeadSHA, plan.WorktreeHash)
+	capabilityKeys := make([]string, 0, len(evidence.AdapterCapabilityVersions))
+	for key := range evidence.AdapterCapabilityVersions {
+		capabilityKeys = append(capabilityKeys, key)
+	}
+	sort.Strings(capabilityKeys)
+	capabilities := make([]string, 0, len(capabilityKeys))
+	for _, key := range capabilityKeys {
+		capabilities = append(capabilities, key+"="+evidence.AdapterCapabilityVersions[key])
+	}
+	versions := "adapter capability versions: none recorded"
+	if len(capabilities) > 0 {
+		versions = "adapter capability versions: " + strings.Join(capabilities, ", ")
+	}
+	toolchain := "toolchain digest: not recorded"
+	if evidence.Snapshot.ToolchainDigest != "" {
+		toolchain = "toolchain digest: " + evidence.Snapshot.ToolchainDigest
+	}
+	return changeSummary + "; " + ids + "; " + versions + "; " + toolchain + "."
 }
 
 func explanationSuffix(plan domain.VerificationPlan) string {
@@ -1013,6 +1400,34 @@ func estimatedDuration(unit domain.TestUnit, policy domain.Policy) int64 {
 		return 0
 	}
 	return duration + policy.StartupOverheadMillis
+}
+
+// estimatedDurationP50 is the optimistic runtime bound for one unit: the
+// observed P50 when the sample count permits, otherwise the same conservative
+// estimate as the P95 bound (LLD 6.3 Stage 7 cost(t): P95 when sample count
+// permits, otherwise an adapter/module estimate).
+func estimatedDurationP50(unit domain.TestUnit, policy domain.Policy) int64 {
+	if unit.DurationSampleCount >= 5 && unit.DurationP50Millis > 0 {
+		return unit.DurationP50Millis + policy.StartupOverheadMillis
+	}
+	return estimatedDuration(unit, policy)
+}
+
+// durationBounds aggregates per-unit runtime uncertainty into the plan-level
+// P50-P95 interval (LLD 6.2: estimated runtime including uncertainty bounds).
+// The P95 bound reuses each candidate's conservative duration, so the
+// interval can only narrow the point estimate, never widen it past the
+// conservative side.
+func durationBounds(selected []*candidate, policy domain.Policy) (int64, int64) {
+	var p50, p95 int64
+	for _, c := range selected {
+		p50 += estimatedDurationP50(c.unit, policy)
+		p95 += c.duration
+	}
+	if p50 > p95 {
+		p50 = p95
+	}
+	return p50, p95
 }
 
 func allDurationsKnown(selected []*candidate) bool {
@@ -1242,7 +1657,12 @@ func isMigrationPath(value string) bool {
 
 func isContractPath(value string) bool {
 	lower := strings.ToLower(value)
-	return strings.HasSuffix(lower, ".proto") || strings.HasSuffix(lower, ".graphql") || strings.HasSuffix(lower, ".openapi.yaml") || strings.HasSuffix(lower, ".openapi.json") || strings.HasSuffix(lower, ".schema.json") || strings.Contains(lower, "/contracts/") || strings.HasPrefix(lower, "contracts/")
+	base := path.Base(lower)
+	if strings.HasSuffix(lower, ".proto") || strings.HasSuffix(lower, ".graphql") || strings.HasSuffix(lower, ".openapi.yaml") || strings.HasSuffix(lower, ".openapi.json") || strings.HasSuffix(lower, ".schema.json") || strings.Contains(lower, "/contracts/") || strings.HasPrefix(lower, "contracts/") {
+		return true
+	}
+	// Root-style API descriptions: openapi.yaml, openapi.v3.json, swagger.json.
+	return strings.HasPrefix(base, "openapi.") || strings.HasPrefix(base, "swagger.")
 }
 
 func isHardConfigPath(value string, patterns []string) bool {
@@ -1343,7 +1763,12 @@ func evidenceRefs(evidence EvidenceSnapshot, impact ImpactResult) []domain.Evide
 		if refs[i].StableKey != refs[j].StableKey {
 			return refs[i].StableKey < refs[j].StableKey
 		}
-		return refs[i].Digest < refs[j].Digest
+		if refs[i].Digest != refs[j].Digest {
+			return refs[i].Digest < refs[j].Digest
+		}
+		// Final tie-break so references that share kind/key/digest but differ
+		// only by observation time keep a stable order across runs.
+		return refs[i].ObservedAt.Before(refs[j].ObservedAt)
 	})
 	unique := refs[:0]
 	for _, ref := range refs {

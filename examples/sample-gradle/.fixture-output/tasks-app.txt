@@ -1,0 +1,5 @@
+Verification tasks
+-------------------
+ test - Runs the app unit test suite.
+ integrationTest - Runs the app integration test suite.
+ check - Runs all checks.

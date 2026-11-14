@@ -56,15 +56,15 @@ type DiscoverRequest struct {
 }
 
 type DiscoveryResult struct {
-	Units                        []TestUnit `json:"units"`
-	BuildTargets                 []BuildTarget `json:"build_targets,omitempty"`
-	Complete                     bool       `json:"complete"`
-	SourceToTestEvidenceComplete bool       `json:"source_to_test_evidence_complete,omitempty"`
-	BuildDependencyEvidenceComplete bool     `json:"build_dependency_evidence_complete,omitempty"`
-	Reasons                      []string   `json:"reasons,omitempty"`
-	Version                      string     `json:"version,omitempty"`
-	AffectedTargets              []string   `json:"affected_targets,omitempty"`
-	SourceMappings                []SourceTestMapping `json:"source_mappings,omitempty"`
+	Units                           []TestUnit          `json:"units"`
+	BuildTargets                    []BuildTarget       `json:"build_targets,omitempty"`
+	Complete                        bool                `json:"complete"`
+	SourceToTestEvidenceComplete    bool                `json:"source_to_test_evidence_complete,omitempty"`
+	BuildDependencyEvidenceComplete bool                `json:"build_dependency_evidence_complete,omitempty"`
+	Reasons                         []string            `json:"reasons,omitempty"`
+	Version                         string              `json:"version,omitempty"`
+	AffectedTargets                 []string            `json:"affected_targets,omitempty"`
+	SourceMappings                  []SourceTestMapping `json:"source_mappings,omitempty"`
 }
 
 // BuildTarget preserves native project/build dependency evidence separately
@@ -83,11 +83,11 @@ type BuildTarget struct {
 // preserves it as provenance-bearing evidence; it does not by itself attest
 // that the mapping covers every relevant source in the repository.
 type SourceTestMapping struct {
-	TargetKey    string  `json:"target_key"`
-	PathPattern  string  `json:"path_pattern"`
-	Precision    string  `json:"precision"`
-	EvidenceSource string `json:"evidence_source"`
-	Confidence   float64 `json:"confidence"`
+	TargetKey      string  `json:"target_key"`
+	PathPattern    string  `json:"path_pattern"`
+	Precision      string  `json:"precision"`
+	EvidenceSource string  `json:"evidence_source"`
+	Confidence     float64 `json:"confidence"`
 }
 
 type TestUnit struct {
@@ -123,6 +123,19 @@ type AdapterConfig struct {
 	Options            []string     `json:"options,omitempty" yaml:"options,omitempty"`
 	CoveragePaths      []string     `json:"coverage_paths,omitempty" yaml:"coverage_paths,omitempty"`
 	MaxOutputBytes     int64        `json:"max_output_bytes,omitempty" yaml:"max_output_bytes,omitempty"`
+	// Provider toggles are tri-state. A nil pointer means the configuration
+	// key was unset and the adapter keeps its documented default behavior; an
+	// explicit false disables the provider. Adapters must never read a
+	// missing key as "disabled".
+	SurefireEnabled *bool `json:"surefire_enabled,omitempty" yaml:"surefire_enabled,omitempty"`
+	FailsafeEnabled *bool `json:"failsafe_enabled,omitempty" yaml:"failsafe_enabled,omitempty"`
+}
+
+// ProviderEnabled resolves a tri-state provider toggle. A nil toggle means the
+// key was unset, which keeps the provider enabled with the adapter's default
+// behavior; only an explicit false disables it.
+func ProviderEnabled(toggle *bool) bool {
+	return toggle == nil || *toggle
 }
 
 type TargetSpec struct {
@@ -220,7 +233,18 @@ type CoverageResult struct {
 	LinesFound   int64                   `json:"lines_found,omitempty"`
 	LinesHit     int64                   `json:"lines_hit,omitempty"`
 	Files        map[string]FileCoverage `json:"files,omitempty"`
-	Reasons      []string                `json:"reasons,omitempty"`
+	// Contexts holds the per-test coverage contexts the report carries
+	// (coverage.py's per-test contexts, LLD 8.6). The context name is the
+	// test that produced the coverage; the value maps the covered files to
+	// the line numbers that test executed.
+	Contexts map[string]ContextCoverage `json:"contexts,omitempty"`
+	Reasons  []string                   `json:"reasons,omitempty"`
+}
+
+// ContextCoverage is the coverage attributed to a single test context.
+type ContextCoverage struct {
+	// Files maps a repository-relative file path to the covered line numbers.
+	Files map[string][]int `json:"files"`
 }
 
 type FileCoverage struct {

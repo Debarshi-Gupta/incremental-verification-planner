@@ -101,11 +101,11 @@ func (s *S3Store) Put(ctx context.Context, key, mediaType string, src io.Reader,
 	}
 	response, err := s.client.Do(request)
 	if err != nil {
-		return meta, fmt.Errorf("S3 object upload failed: %w", err)
+		return meta, fmt.Errorf("%w: S3 object upload failed: %v", ErrUnavailable, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return meta, fmt.Errorf("S3 object upload returned HTTP %d", response.StatusCode)
+		return meta, fmt.Errorf("%w: S3 object upload returned HTTP %d", ErrUnavailable, response.StatusCode)
 	}
 	return Metadata{Key: key, MediaType: mediaType, Size: int64(len(data)), SHA256: hex.EncodeToString(hash[:])}, nil
 }
@@ -113,15 +113,19 @@ func (s *S3Store) Put(ctx context.Context, key, mediaType string, src io.Reader,
 func (s *S3Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	request, err := s.request(ctx, http.MethodGet, key, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	response, err := s.client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("S3 object retrieval failed: %w", err)
+		return nil, fmt.Errorf("%w: S3 object retrieval failed: %v", ErrUnavailable, err)
+	}
+	if response.StatusCode == http.StatusNotFound {
+		response.Body.Close()
+		return nil, fmt.Errorf("%w: S3 object does not exist", ErrNotFound)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		response.Body.Close()
-		return nil, fmt.Errorf("S3 object retrieval returned HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("%w: S3 object retrieval returned HTTP %d", ErrUnavailable, response.StatusCode)
 	}
 	return response.Body, nil
 }
@@ -133,11 +137,14 @@ func (s *S3Store) Delete(ctx context.Context, key string) error {
 	}
 	response, err := s.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("S3 object deletion failed: %w", err)
+		return fmt.Errorf("%w: S3 object deletion failed: %v", ErrUnavailable, err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("S3 object deletion returned HTTP %d", response.StatusCode)
+		return fmt.Errorf("%w: S3 object deletion returned HTTP %d", ErrUnavailable, response.StatusCode)
 	}
 	return nil
 }

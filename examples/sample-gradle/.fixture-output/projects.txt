@@ -1,0 +1,3 @@
+Root project 'sample'
++--- Project ':shared'
+\--- Project ':app'

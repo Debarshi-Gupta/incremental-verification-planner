@@ -39,13 +39,13 @@ type trustedPolicy struct {
 
 func (c *apiClient) getTrustedPolicy(ctx context.Context, repositoryID uuid.UUID) (trustedPolicy, error) {
 	var envelope struct {
-		Policy            json.RawMessage `json:"policy"`
-		Version           int64           `json:"version"`
-		PolicyHash        string          `json:"policy_hash"`
-		Trusted           bool            `json:"trusted"`
+		Policy             json.RawMessage `json:"policy"`
+		Version            int64           `json:"version"`
+		PolicyHash         string          `json:"policy_hash"`
+		Trusted            bool            `json:"trusted"`
 		SignatureAlgorithm string          `json:"signature_algorithm"`
-		SigningKeyID      string          `json:"signing_key_id"`
-		Signature         string          `json:"signature"`
+		SigningKeyID       string          `json:"signing_key_id"`
+		Signature          string          `json:"signature"`
 	}
 	path := "/api/v1/repositories/" + repositoryID.String() + "/policy"
 	if err := c.request(ctx, http.MethodGet, path, nil, "", &envelope); err != nil {

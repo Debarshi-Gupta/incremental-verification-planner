@@ -11,12 +11,15 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 type Record struct {
 	ID                    string   `json:"id"`
 	Adapter               string   `json:"adapter"`
 	RiskLevel             string   `json:"risk_level"`
+	Timestamp             string   `json:"timestamp"`
+	ChangeClass           string   `json:"change_class"`
 	Comparable            bool     `json:"comparable"`
 	IncomparableReason    string   `json:"incomparable_reason,omitempty"`
 	SelectedRuntimeMillis int64    `json:"selected_runtime_ms"`
@@ -46,41 +49,95 @@ type Summary struct {
 }
 
 func main() {
-	input := os.Stdin
-	if len(os.Args) > 2 {
-		fmt.Fprintln(os.Stderr, "usage: historical-replay [records.jsonl]")
-		os.Exit(2)
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+// periodReport is one chronological train/calibration/evaluation slice of the
+// input. Start/End are the period boundaries derived by splitPeriods (RFC3339);
+// for an empty input both are the zero time.
+type periodReport struct {
+	Period      string    `json:"period"`
+	Start       string    `json:"start"`
+	End         string    `json:"end"`
+	RecordCount int       `json:"record_count"`
+	Summaries   []Summary `json:"summaries"`
+}
+
+// cliReport is the stdout document. The pre-split fields (input_records,
+// summaries, risk_based_ci_eligible, eligibility_note) are unchanged; periods
+// is a pure extension so existing consumers keep working.
+type cliReport struct {
+	InputRecords        int            `json:"input_records"`
+	Summaries           []Summary      `json:"summaries"`
+	Periods             []periodReport `json:"periods"`
+	RiskBasedCIEligible bool           `json:"risk_based_ci_eligible"`
+	EligibilityNote     string         `json:"eligibility_note"`
+}
+
+const eligibilityNote = "Eligibility remains disabled until organization-approved thresholds are met on representative held-out data."
+
+// run executes the historical-replay CLI. Exit codes: 0 success, 2 usage or
+// invalid input, 1 output encoding failure (mirrors the previous main()).
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// args excludes the program name: at most one positional record path (the
+	// previous main() checked len(os.Args) > 2, i.e. more than one argument).
+	if len(args) > 1 {
+		fmt.Fprintln(stderr, "usage: historical-replay [records.jsonl]")
+		return 2
 	}
-	if len(os.Args) == 2 && os.Args[1] != "-" {
-		file, err := os.Open(os.Args[1])
+	input := stdin
+	if len(args) == 1 && args[0] != "-" {
+		file, err := os.Open(args[0])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "open replay input:", err)
-			os.Exit(2)
+			fmt.Fprintln(stderr, "open replay input:", err)
+			return 2
 		}
 		defer file.Close()
 		input = file
 	}
 	records, err := readRecords(input)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "invalid replay input:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "invalid replay input:", err)
+		return 2
 	}
 	summaries, err := summarize(records)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot summarize replay input:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "cannot summarize replay input:", err)
+		return 2
 	}
-	out := json.NewEncoder(os.Stdout)
+	split, err := splitPeriods(records)
+	if err != nil {
+		fmt.Fprintln(stderr, "cannot split replay input:", err)
+		return 2
+	}
+	periods := make([]periodReport, 0, 3)
+	for _, period := range []Period{split.Train, split.Calibration, split.Evaluation} {
+		periodSummaries, err := summarize(period.Records)
+		if err != nil {
+			fmt.Fprintln(stderr, "cannot summarize period", period.Name, ":", err)
+			return 2
+		}
+		periods = append(periods, periodReport{
+			Period:      period.Name,
+			Start:       period.Start.Format(time.RFC3339),
+			End:         period.End.Format(time.RFC3339),
+			RecordCount: len(period.Records),
+			Summaries:   periodSummaries,
+		})
+	}
+	out := json.NewEncoder(stdout)
 	out.SetIndent("", "  ")
-	if err := out.Encode(struct {
-		InputRecords        int       `json:"input_records"`
-		Summaries           []Summary `json:"summaries"`
-		RiskBasedCIEligible bool      `json:"risk_based_ci_eligible"`
-		EligibilityNote     string    `json:"eligibility_note"`
-	}{len(records), summaries, false, "Eligibility remains disabled until organization-approved thresholds are met on representative held-out data."}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if err := out.Encode(cliReport{
+		InputRecords:        len(records),
+		Summaries:           summaries,
+		Periods:             periods,
+		RiskBasedCIEligible: false,
+		EligibilityNote:     eligibilityNote,
+	}); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 func readRecords(r io.Reader) ([]Record, error) {
@@ -99,8 +156,14 @@ func readRecords(r io.Reader) ([]Record, error) {
 		if err := decoder.Decode(&item); err != nil {
 			return nil, fmt.Errorf("line %d: %w", line, err)
 		}
-		if item.ID == "" || item.Adapter == "" || item.RiskLevel == "" {
-			return nil, fmt.Errorf("line %d: id, adapter, and risk_level are required", line)
+		if item.ID == "" || item.Adapter == "" || item.RiskLevel == "" || item.Timestamp == "" || item.ChangeClass == "" {
+			return nil, fmt.Errorf("line %d: id, adapter, risk_level, timestamp, and change_class are required", line)
+		}
+		if _, err := time.Parse(time.RFC3339, item.Timestamp); err != nil {
+			return nil, fmt.Errorf("line %d: timestamp must be RFC3339: %w", line, err)
+		}
+		if !validChangeClasses[item.ChangeClass] {
+			return nil, fmt.Errorf("line %d: change_class %q must be one of: %s", line, item.ChangeClass, strings.Join(changeClasses, ", "))
 		}
 		if item.SelectedRuntimeMillis < 0 || item.FullRuntimeMillis < 0 || item.SelectedCPUMillis < 0 || item.FullCPUMillis < 0 {
 			return nil, fmt.Errorf("line %d: durations must be nonnegative", line)

@@ -1,0 +1,10 @@
+------------------------------------------------------------
+Project ':app'
+------------------------------------------------------------
+
+compileClasspath
++--- project :shared
+\--- project :shared
+
+runtimeClasspath
++--- project :shared

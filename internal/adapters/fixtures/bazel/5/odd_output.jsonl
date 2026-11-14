@@ -1,0 +1,4 @@
+{"id": {"started": {"eventName": "BUILD"}}, "started": {"exitCode": 0, "success": true}}
+{"id": {"testResult": {"label": "//app:tests"}}, "testResult": {"label": "//app:tests", "status": "PASSED", "testActionExitCode": 0, "testActionOutput": [{"output": "test.log", "text": "stdout: \u001b[31mseed run\u001b[0m reset; login password=hunter2; api key AKIAFAKEEXAMPLEKEY; тест 🎉 пройден"}]}}
+{"id": {"testResult": {"label": "//lib:tests"}}, "testResult": {"label": "//lib:tests", "status": "PASSED", "testActionExitCode": 0}}
+{"id": {"testSummary": {"label": "//:all"}}, "testSummary": {"overallStatus": "PASSED", "totalRunCount": 2, "passed": 2, "failed": 0, "flaky": 0}}

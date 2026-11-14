@@ -1,0 +1,5 @@
+{"id": {"started": {"eventName": "BUILD"}}, "started": {"exitCode": 0, "success": true}}
+{"id": {"testResult": {"label": "//app:tests"}}, "testResult": {"label": "//app:tests", "status": "PASSED", "testActionExitCode": 0}}
+{"id": {"testResult": {"label": "//lib:tests"}}, "testResult": {"label": "//lib:tests", "status": "PASSED", "testActionExitCode": 0}}
+{"id": {"testResult": {"label": "//tool:tests"}}, "testResult": {"label": "//tool:tests", "status": "PASSED", "testActionExitCode": 0}}
+{"id": {"testSummary": {"label": "//:all"}}, "testSummary": {"overallStatus": "PASSED", "totalRunCount": 3, "passed": 3, "failed": 0, "flaky": 0, "totalNumTests": 3}}

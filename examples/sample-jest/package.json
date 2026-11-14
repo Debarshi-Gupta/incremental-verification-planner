@@ -1,0 +1,9 @@
+{
+  "name": "sample-jest",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Section 17.3 jest fixture repository",
+  "scripts": {
+    "test": "jest"
+  }
+}

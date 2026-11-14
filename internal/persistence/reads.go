@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ivp/ivp/internal/audit"
 	"github.com/ivp/ivp/internal/domain"
 	"github.com/jackc/pgx/v5"
 )
@@ -52,27 +53,35 @@ func (d *DB) GetExecution(ctx context.Context, tenantID, executionID uuid.UUID) 
 }
 
 type RepositoryMetrics struct {
-	RepositoryID             uuid.UUID      `json:"repository_id"`
-	WindowStart              time.Time      `json:"window_start"`
-	AcceptedChanges          int64          `json:"accepted_changes"`
-	AcceptedCorrectChanges   int64          `json:"accepted_correct_changes"`
-	MeanTimeToAcceptedCorrectMillis float64 `json:"mean_time_to_accepted_correct_ms"`
-	MeanCostPerAcceptedCorrectMicrousd float64 `json:"mean_cost_per_accepted_correct_microusd"`
-	MeanHumanCorrectionMinutes float64     `json:"mean_human_correction_minutes"`
-	CalibrationBreakdown      []CalibrationBreakdown `json:"calibration_breakdown"`
-	ComparableAudits         int64          `json:"comparable_audits"`
-	IncomparableAudits       int64          `json:"incomparable_audits"`
-	ConfirmedMisses          int64          `json:"confirmed_misses"`
-	PossibleMisses           int64          `json:"possible_misses"`
-	ObservedMissRate         float64        `json:"observed_miss_rate"`
-	MissRateCI95Lower        float64        `json:"miss_rate_ci95_lower"`
-	MissRateCI95Upper        float64        `json:"miss_rate_ci95_upper"`
-	TargetedPasses           int64          `json:"targeted_passes"`
-	FullVerificationPasses   int64          `json:"full_verification_passes"`
-	ExecutionCount           int64          `json:"execution_count"`
-	MeanEstimatedActualRatio float64        `json:"mean_estimated_actual_ratio"`
-	Daily                    []DailyMetrics `json:"daily"`
-	NextCursor               string         `json:"next_cursor,omitempty"`
+	RepositoryID                       uuid.UUID              `json:"repository_id"`
+	WindowStart                        time.Time              `json:"window_start"`
+	AcceptedChanges                    int64                  `json:"accepted_changes"`
+	AcceptedCorrectChanges             int64                  `json:"accepted_correct_changes"`
+	MeanTimeToAcceptedCorrectMillis    float64                `json:"mean_time_to_accepted_correct_ms"`
+	MeanCostPerAcceptedCorrectMicrousd float64                `json:"mean_cost_per_accepted_correct_microusd"`
+	MeanHumanCorrectionMinutes         float64                `json:"mean_human_correction_minutes"`
+	CalibrationBreakdown               []CalibrationBreakdown `json:"calibration_breakdown"`
+	ComparableAudits                   int64                  `json:"comparable_audits"`
+	IncomparableAudits                 int64                  `json:"incomparable_audits"`
+	ConfirmedMisses                    int64                  `json:"confirmed_misses"`
+	PossibleMisses                     int64                  `json:"possible_misses"`
+	ObservedMissRate                   float64                `json:"observed_miss_rate"`
+	MissRateCI95Lower                  float64                `json:"miss_rate_ci95_lower"`
+	MissRateCI95Upper                  float64                `json:"miss_rate_ci95_upper"`
+	TargetedPasses                     int64                  `json:"targeted_passes"`
+	FullVerificationPasses             int64                  `json:"full_verification_passes"`
+	ExecutionCount                     int64                  `json:"execution_count"`
+	MeanEstimatedActualRatio           float64                `json:"mean_estimated_actual_ratio"`
+	Daily                              []DailyMetrics         `json:"daily"`
+	// CalibrationMetrics is the LLD 10.6 metric set computed from the
+	// persisted evidence of this repository. Every metric states its own
+	// denominator and whether it is defined.
+	CalibrationMetrics map[string]audit.MetricValue `json:"calibration_metrics,omitempty"`
+	// CalibrationBreakdowns splits the calibration metrics by adapter.
+	CalibrationBreakdowns map[string]map[string]audit.MetricValue `json:"calibration_breakdowns,omitempty"`
+	// ScheduledAudit is the LLD 10.2 scheduled-audit state of the repository.
+	ScheduledAudit ScheduledAuditState `json:"scheduled_audit"`
+	NextCursor     string              `json:"next_cursor,omitempty"`
 }
 type DailyMetrics struct {
 	Day                time.Time `json:"day"`
@@ -82,21 +91,23 @@ type DailyMetrics struct {
 }
 
 type CalibrationBreakdown struct {
-	Mode                      domain.PlanMode  `json:"mode"`
-	RiskLevel                 domain.RiskLevel `json:"risk_level"`
-	ExecutionCount            int64            `json:"execution_count"`
-	TargetedPasses            int64            `json:"targeted_passes"`
-	FullVerificationPasses    int64            `json:"full_verification_passes"`
-	ComparableAudits          int64            `json:"comparable_audits"`
-	Misses                    int64            `json:"misses"`
-	MeanEstimatedActualRatio  float64          `json:"mean_estimated_actual_ratio"`
-	MeanSelectionConfidence   float64          `json:"mean_selection_confidence"`
-	MeanWeightedCoverage      float64          `json:"mean_weighted_coverage"`
+	Mode                     domain.PlanMode  `json:"mode"`
+	RiskLevel                domain.RiskLevel `json:"risk_level"`
+	ExecutionCount           int64            `json:"execution_count"`
+	TargetedPasses           int64            `json:"targeted_passes"`
+	FullVerificationPasses   int64            `json:"full_verification_passes"`
+	ComparableAudits         int64            `json:"comparable_audits"`
+	Misses                   int64            `json:"misses"`
+	MeanEstimatedActualRatio float64          `json:"mean_estimated_actual_ratio"`
+	MeanSelectionConfidence  float64          `json:"mean_selection_confidence"`
+	MeanWeightedCoverage     float64          `json:"mean_weighted_coverage"`
 }
 
 // CalibrationCounts returns observed, completed executions with usable timing
 // data and comparable audits for the repository. These server-owned counts
-// gate RISK_BASED_CI; a repository policy cannot self-report them.
+// gate RISK_BASED_CI; a repository policy cannot self-report them. Per LLD 7.2
+// the execution count is scoped to OBSERVE-mode plans only: calibration runs
+// are the shadow-mode observation runs that precede RISK_BASED_CI enablement.
 func (d *DB) CalibrationCounts(ctx context.Context, tenantID, repositoryID uuid.UUID) (int64, int64, error) {
 	var executions, audits int64
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
@@ -104,7 +115,7 @@ func (d *DB) CalibrationCounts(ctx context.Context, tenantID, repositoryID uuid.
 			FROM executions e JOIN verification_plans p ON p.id=e.plan_id AND p.tenant_id=e.tenant_id
 			WHERE e.tenant_id=$1 AND p.repository_id=$2 AND e.completed_at IS NOT NULL AND e.elapsed_ms>0
 			AND e.outcome IN ('TARGETED_PASS','TARGETED_FAIL','FULL_VERIFICATION_PASS','FULL_VERIFICATION_FAIL')
-			AND p.estimated_duration_ms>0`, tenantID, repositoryID).Scan(&executions); err != nil {
+			AND p.estimated_duration_ms>0 AND p.mode='OBSERVE'`, tenantID, repositoryID).Scan(&executions); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT count(*)
@@ -117,6 +128,7 @@ func (d *DB) CalibrationCounts(ctx context.Context, tenantID, repositoryID uuid.
 
 func (d *DB) GetExecutionUnitResults(ctx context.Context, tenantID, executionID uuid.UUID) ([]UnitResult, error) {
 	results := make([]UnitResult, 0)
+	corrections := make([]ResultCorrection, 0)
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT test_unit_key,attempt,status,duration_ms,failure_fingerprint,report_hash,summary_json FROM execution_unit_results WHERE tenant_id=$1 AND execution_id=$2 ORDER BY test_unit_key,attempt`, tenantID, executionID)
 		if err != nil {
@@ -130,9 +142,35 @@ func (d *DB) GetExecutionUnitResults(ctx context.Context, tenantID, executionID 
 			}
 			results = append(results, item)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Superseding corrections (LLD 12.4) are read alongside the results:
+		// the stored rows stay untouched, the effective status is corrected.
+		correctionRows, err := tx.Query(ctx, `SELECT id,execution_id,test_unit_key,attempt,superseded_status,superseding_status,reason,corrected_by,created_at FROM result_corrections WHERE tenant_id=$1 AND execution_id=$2 ORDER BY created_at,id`, tenantID, executionID)
+		if err != nil {
+			return err
+		}
+		defer correctionRows.Close()
+		for correctionRows.Next() {
+			var correction ResultCorrection
+			var correctedBy *uuid.UUID
+			if err := correctionRows.Scan(&correction.ID, &correction.ExecutionID, &correction.TestUnitKey, &correction.Attempt,
+				&correction.SupersededStatus, &correction.SupersedingStatus, &correction.Reason, &correctedBy, &correction.CreatedAt); err != nil {
+				return err
+			}
+			correction.TenantID = tenantID
+			if correctedBy != nil {
+				correction.CorrectedBy = *correctedBy
+			}
+			corrections = append(corrections, correction)
+		}
+		return correctionRows.Err()
 	})
-	return results, err
+	if err != nil {
+		return results, err
+	}
+	return ApplyResultCorrections(results, corrections), nil
 }
 
 func (d *DB) GetRepositoryMetrics(ctx context.Context, tenantID, repositoryID uuid.UUID, limit int, cursor string) (RepositoryMetrics, error) {

@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="com.example.AccountServiceTest" tests="3" errors="0" skipped="0" failures="0" time="0.089">
+  <testcase name="createsAccount" classname="com.example.AccountServiceTest" time="0.021"/>
+  <testcase name="rejectsDuplicateEmail" classname="com.example.AccountServiceTest" time=

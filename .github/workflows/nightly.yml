@@ -1,0 +1,91 @@
+name: Nightly
+
+# LLD 17.9: "Nightly CI runs integration fixtures with native tools." The
+# pull-request gate stays toolchain-free; the nightly job installs the native
+# build tools and runs the adapter fixtures against the checked-in sample
+# projects, the database-backed suites, the performance measurements and the
+# historical replay.
+#
+# The runner image already provides Java, Node.js and Python; only Bazelisk
+# and the Python/Node packages are installed here.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install the native build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pytest-cov coverage
+          npm install -g @bazel/bazelisk
+          # The Nx and Jest samples carry their own package manifests.
+          (cd examples/sample-nx && npm install --no-audit --no-fund)
+          (cd examples/sample-jest && npm install --no-audit --no-fund)
+      - name: Native adapter execution over the sample projects
+        shell: bash
+        run: go test -tags native ./tests/native/... -count=1 -v
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: ivp
+          POSTGRES_USER: ivp
+          POSTGRES_PASSWORD: ivp-ci-only
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U ivp -d ivp"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Database-backed integration suites
+        env:
+          IVP_TEST_DATABASE_URL: postgres://ivp:ivp-ci-only@localhost:5432/ivp?sslmode=disable
+        run: go test -tags=integration ./internal/persistence ./internal/service -count=1
+
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Performance and service-level measurements
+        run: go test -tags performance ./tests/performance/... -count=1 -v
+
+  historical-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Historical replay corpus
+        run: go test ./tests/historical-replay/... -count=1 -v

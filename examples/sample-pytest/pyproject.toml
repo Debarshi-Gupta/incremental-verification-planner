@@ -1,0 +1,13 @@
+[project]
+name = "sample-pytest"
+version = "0.1.0"
+description = "Section 17.3 pytest fixture repository"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["app"]
+branch = true

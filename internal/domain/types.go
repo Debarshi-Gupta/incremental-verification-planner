@@ -21,21 +21,31 @@ type Repository struct {
 
 // RepositorySnapshot is immutable evidence for one repository tree/worktree.
 type RepositorySnapshot struct {
-	ID                  UUID      `json:"id"`
-	RepositoryID        UUID      `json:"repository_id"`
-	CommitSHA           string    `json:"commit_sha"`
-	BaseSHA             string    `json:"base_sha"`
-	TreeHash            string    `json:"tree_hash"`
-	WorktreeHash        string    `json:"worktree_hash"`
-	SubmoduleDigest     string    `json:"submodule_digest"`
-	ToolchainDigest     string    `json:"toolchain_digest"`
-	BuildConfigDigest   string    `json:"build_config_digest"`
-	TestConfigDigest    string    `json:"test_config_digest"`
-	AdapterSetDigest    string    `json:"adapter_set_digest"`
-	GraphVersion        int64     `json:"graph_version"`
-	EvidenceGeneratedAt time.Time `json:"evidence_generated_at"`
-	IsComplete          bool      `json:"is_complete"`
-	CompletenessReasons []string  `json:"completeness_reasons,omitempty"`
+	ID                UUID   `json:"id"`
+	RepositoryID      UUID   `json:"repository_id"`
+	CommitSHA         string `json:"commit_sha"`
+	BaseSHA           string `json:"base_sha"`
+	TreeHash          string `json:"tree_hash"`
+	WorktreeHash      string `json:"worktree_hash"`
+	SubmoduleDigest   string `json:"submodule_digest"`
+	ToolchainDigest   string `json:"toolchain_digest"`
+	BuildConfigDigest string `json:"build_config_digest"`
+	TestConfigDigest  string `json:"test_config_digest"`
+	AdapterSetDigest  string `json:"adapter_set_digest"`
+	// DependencyDigest identifies the resolved dependency set (lockfiles) the
+	// snapshot was produced with. Coverage evidence produced under a different
+	// dependency version is stale and must not justify selective verification
+	// (LLD 23 scenario 6).
+	DependencyDigest string `json:"dependency_digest,omitempty"`
+	// AdapterVersions records the adapter versions that produced this
+	// snapshot's adapter-specific evidence. A later version change invalidates
+	// that evidence unless a compatibility check proves it remains comparable
+	// (LLD 18.4).
+	AdapterVersions     map[string]string `json:"adapter_versions,omitempty"`
+	GraphVersion        int64             `json:"graph_version"`
+	EvidenceGeneratedAt time.Time         `json:"evidence_generated_at"`
+	IsComplete          bool              `json:"is_complete"`
+	CompletenessReasons []string          `json:"completeness_reasons,omitempty"`
 }
 
 type LineRange struct {
@@ -109,22 +119,30 @@ type TestUnit struct {
 }
 
 type CoverageObservation struct {
-	TestUnitKey            string            `json:"test_unit_key"`
-	CoveredStableKey       string            `json:"covered_stable_key"`
-	CoveredPath            string            `json:"covered_path,omitempty"`
-	LineStart              int               `json:"line_start,omitempty"`
-	LineEnd                int               `json:"line_end,omitempty"`
-	SourceType             string            `json:"source_type"`
-	ReportHash             string            `json:"report_hash"`
-	RunID                  UUID              `json:"run_id"`
-	ObservedAt             time.Time         `json:"observed_at"`
-	EnvironmentFingerprint string            `json:"environment_fingerprint"`
-	BuildConfigDigest      string            `json:"build_config_digest"`
-	TestConfigDigest       string            `json:"test_config_digest"`
-	Precision              CoveragePrecision `json:"precision"`
-	SuiteLevel             bool              `json:"suite_level"`
-	TestSpecific           bool              `json:"test_specific"`
-	EvidenceConfidence     float64           `json:"evidence_confidence"`
+	TestUnitKey            string    `json:"test_unit_key"`
+	CoveredStableKey       string    `json:"covered_stable_key"`
+	CoveredPath            string    `json:"covered_path,omitempty"`
+	LineStart              int       `json:"line_start,omitempty"`
+	LineEnd                int       `json:"line_end,omitempty"`
+	SourceType             string    `json:"source_type"`
+	ReportHash             string    `json:"report_hash"`
+	RunID                  UUID      `json:"run_id"`
+	ObservedAt             time.Time `json:"observed_at"`
+	EnvironmentFingerprint string    `json:"environment_fingerprint"`
+	BuildConfigDigest      string    `json:"build_config_digest"`
+	TestConfigDigest       string    `json:"test_config_digest"`
+	// DependencyDigest is the dependency version (lockfile digest) the report
+	// was produced under. A report from a previous dependency version is stale
+	// (LLD 23 scenario 6).
+	DependencyDigest string `json:"dependency_digest,omitempty"`
+	// AdapterVersion is the adapter version that produced the report. It is
+	// the provenance used by the adapter-version compatibility check
+	// (LLD 18.4).
+	AdapterVersion     string            `json:"adapter_version,omitempty"`
+	Precision          CoveragePrecision `json:"precision"`
+	SuiteLevel         bool              `json:"suite_level"`
+	TestSpecific       bool              `json:"test_specific"`
+	EvidenceConfidence float64           `json:"evidence_confidence"`
 }
 
 type EvidenceReference struct {
@@ -176,34 +194,44 @@ type RiskContribution struct {
 }
 
 type VerificationPlan struct {
-	ID                      UUID                `json:"id"`
-	RepositoryID            UUID                `json:"repository_id"`
-	SnapshotID              UUID                `json:"snapshot_id"`
-	BaseSHA                 string              `json:"base_sha"`
-	HeadSHA                 string              `json:"head_sha"`
-	WorktreeHash            string              `json:"worktree_hash"`
-	Mode                    PlanMode            `json:"mode"`
-	Status                  PlanStatus          `json:"status"`
-	RiskScore               int                 `json:"risk_score"`
-	RiskLevel               RiskLevel           `json:"risk_level"`
-	RiskContributions       []RiskContribution  `json:"risk_contributions"`
-	SelectionConfidence     float64             `json:"selection_confidence"`
-	WeightedCoverage        float64             `json:"weighted_coverage"`
-	EstimatedDurationMillis int64               `json:"estimated_duration_ms"`
-	EstimatedComputeMillis  int64               `json:"estimated_compute_ms"`
-	SelectedUnits           []PlanUnit          `json:"selected_units"`
-	MandatoryUnits          []PlanUnit          `json:"mandatory_units"`
-	OmittedUnits            []OmittedUnit       `json:"omitted_units"`
-	EscalationReasons       []EscalationReason  `json:"escalation_reasons"`
-	HardRuleChecks          []HardRuleCheck     `json:"hard_rule_checks"`
-	EvidenceReferences      []EvidenceReference `json:"evidence_references"`
-	FullSuiteFallbackRef    string              `json:"full_suite_fallback_ref,omitempty"`
-	Explanation             string              `json:"explanation"`
-	PolicyVersion           int64               `json:"policy_version"`
-	AlgorithmVersion        string              `json:"algorithm_version"`
-	AdapterCapabilities     map[string]string   `json:"adapter_capabilities,omitempty"`
-	CreatedAt               time.Time           `json:"created_at"`
-	ExpiresAt               time.Time           `json:"expires_at"`
+	ID                      UUID               `json:"id"`
+	RepositoryID            UUID               `json:"repository_id"`
+	SnapshotID              UUID               `json:"snapshot_id"`
+	BaseSHA                 string             `json:"base_sha"`
+	HeadSHA                 string             `json:"head_sha"`
+	WorktreeHash            string             `json:"worktree_hash"`
+	Mode                    PlanMode           `json:"mode"`
+	Status                  PlanStatus         `json:"status"`
+	RiskScore               int                `json:"risk_score"`
+	RiskLevel               RiskLevel          `json:"risk_level"`
+	RiskContributions       []RiskContribution `json:"risk_contributions"`
+	SelectionConfidence     float64            `json:"selection_confidence"`
+	WeightedCoverage        float64            `json:"weighted_coverage"`
+	EstimatedDurationMillis int64              `json:"estimated_duration_ms"`
+	EstimatedComputeMillis  int64              `json:"estimated_compute_ms"`
+	// Runtime uncertainty bounds for the selected set (LLD 6.2 "estimated
+	// runtime and cost where data exists, including uncertainty bounds"):
+	// P50 is the optimistic bound, P95 the conservative one used by the
+	// economic rule; both equal the point estimate when no samples exist.
+	EstimatedDurationP50Millis int64               `json:"estimated_duration_p50_ms"`
+	EstimatedDurationP95Millis int64               `json:"estimated_duration_p95_ms"`
+	SelectedUnits              []PlanUnit          `json:"selected_units"`
+	MandatoryUnits             []PlanUnit          `json:"mandatory_units"`
+	OmittedUnits               []OmittedUnit       `json:"omitted_units"`
+	EscalationReasons          []EscalationReason  `json:"escalation_reasons"`
+	HardRuleChecks             []HardRuleCheck     `json:"hard_rule_checks"`
+	EvidenceReferences         []EvidenceReference `json:"evidence_references"`
+	FullSuiteFallbackRef       string              `json:"full_suite_fallback_ref,omitempty"`
+	Explanation                string              `json:"explanation"`
+	PolicyVersion              int64               `json:"policy_version"`
+	AlgorithmVersion           string              `json:"algorithm_version"`
+	// EnvironmentFingerprint is the execution environment fingerprint the
+	// plan was created for. An execution that reports a different fingerprint
+	// invalidates the selective plan (LLD 9.4).
+	EnvironmentFingerprint string            `json:"environment_fingerprint,omitempty"`
+	AdapterCapabilities    map[string]string `json:"adapter_capabilities,omitempty"`
+	CreatedAt              time.Time         `json:"created_at"`
+	ExpiresAt              time.Time         `json:"expires_at"`
 }
 
 type ExecutionOutcome string

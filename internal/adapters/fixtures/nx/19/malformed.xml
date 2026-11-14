@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="apps/web/jest.config.ts" timestamp="2026-10-30T13:22:07" tests="2" failures="1" errors="0" skipped="0" time="0.47">
+    <testcase name="renders header" classname="apps/web/src/app.spec.tsx" time="0.03"/>
+    <testcase name="hydrates theme" classname="apps/web/src/theme.spec.ts" time="0.05">
+      <failure message="expected <dark> but was <light>" type="Error">corruption</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

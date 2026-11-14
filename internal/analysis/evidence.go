@@ -50,4 +50,10 @@ type ImpactResult struct {
 	HasConflict     bool
 	HasCycle        bool
 	MissingEdges    bool
+	// Incomplete marks a traversal that hit a policy bound (LLD 13.3). The
+	// planner escalates on it: the traversal is never silently truncated and
+	// never produces a confident selective plan.
+	Incomplete bool
+	// IncompleteReason explains which bound was reached.
+	IncompleteReason string
 }

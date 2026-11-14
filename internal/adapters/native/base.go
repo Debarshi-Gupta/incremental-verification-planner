@@ -4,7 +4,9 @@ package native
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -18,10 +20,76 @@ type Base struct {
 }
 
 func (b Base) Capabilities() adapters.Capabilities { return b.Caps }
+
+// ValidateConfig rejects unsafe adapter configuration before any command is
+// materialized. Besides NUL bytes, it validates the configured report and
+// coverage paths (they must be repository-relative) and the full-suite argv
+// (it must name an executable and carry no NUL bytes).
 func (b Base) ValidateConfig(c adapters.AdapterConfig) error {
 	for _, arg := range c.Options {
 		if strings.ContainsRune(arg, 0) {
 			return errors.New("adapter option contains NUL")
+		}
+	}
+	if err := validateRepositoryPaths("coverage path", c.CoveragePaths); err != nil {
+		return err
+	}
+	for _, target := range c.Targets {
+		if err := validateRepositoryPaths(fmt.Sprintf("target %q report path", target.ID), target.ReportPaths); err != nil {
+			return err
+		}
+		if err := validateRepositoryPaths(fmt.Sprintf("target %q coverage path", target.ID), target.CoveragePaths); err != nil {
+			return err
+		}
+		for _, arg := range target.Argv {
+			if strings.ContainsRune(arg, 0) {
+				return fmt.Errorf("target %q argument contains NUL", target.ID)
+			}
+		}
+	}
+	return validateFullSuiteArgv(c.FullSuiteArgv)
+}
+
+// validateRepositoryPaths rejects paths that are not repository-relative
+// globs: each path must be non-empty, free of NUL bytes, slash-separated,
+// not absolute, and unable to escape the workspace. The rules mirror the
+// repository-glob validation of the configuration layer, so a path accepted
+// by config.Validate is accepted here too.
+func validateRepositoryPaths(kind string, paths []string) error {
+	for _, p := range paths {
+		if p == "" {
+			return fmt.Errorf("%s is empty", kind)
+		}
+		if strings.ContainsRune(p, 0) {
+			return fmt.Errorf("%s %q contains NUL", kind, p)
+		}
+		if strings.Contains(p, `\`) {
+			return fmt.Errorf("%s %q must use slash separators", kind, p)
+		}
+		if strings.HasPrefix(p, "/") || filepath.IsAbs(p) {
+			return fmt.Errorf("%s %q must be repository-relative", kind, p)
+		}
+		if path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") {
+			return fmt.Errorf("%s %q escapes the repository", kind, p)
+		}
+	}
+	return nil
+}
+
+// validateFullSuiteArgv rejects a malformed full-suite command: the argv must
+// name a non-empty executable and no argument may contain NUL bytes. The
+// executable itself is resolved against the workspace when the command is
+// materialized (ConfiguredCommand).
+func validateFullSuiteArgv(argv []string) error {
+	if len(argv) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(argv[0]) == "" {
+		return errors.New("full-suite argv has an empty executable")
+	}
+	for _, arg := range argv {
+		if strings.ContainsRune(arg, 0) {
+			return errors.New("full-suite argv contains NUL")
 		}
 	}
 	return nil

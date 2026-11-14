@@ -72,6 +72,44 @@ func TestCoveragePyJSONParserAndFormatSniffing(t *testing.T) {
 	}
 }
 
+// LLD 8.6: coverage.py's per-test contexts attribute coverage to the test
+// that produced it; the suite-level result stays exactly as before.
+func TestCoveragePyPerTestContextsAreParsed(t *testing.T) {
+	withContexts := []byte(`{"files":{"pkg/test_api.py":{"executed_lines":[1,2],"missing_lines":[3],"summary":{"num_statements":3,"covered_lines":2,"missing_lines":1},"contexts":{"1":["tests/test_api.py::test_add|run"],"2":["tests/test_api.py::test_add|run","tests/test_api.py::test_sub|run"]}}}}`)
+	got, err := ParseCoverage(withContexts, "coverage.py-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Complete || got.Files["pkg/test_api.py"].LinesFound != 3 || got.LinesHit != 2 {
+		t.Fatalf("suite-level result changed with contexts present: %+v", got)
+	}
+	add, ok := got.Contexts["tests/test_api.py::test_add|run"]
+	if !ok {
+		t.Fatalf("per-test context missing: %+v", got.Contexts)
+	}
+	lines := add.Files["pkg/test_api.py"]
+	if len(lines) != 2 || lines[0] != 1 || lines[1] != 2 {
+		t.Fatalf("context lines = %+v, want [1 2]", lines)
+	}
+	sub, ok := got.Contexts["tests/test_api.py::test_sub|run"]
+	if !ok || len(sub.Files["pkg/test_api.py"]) != 1 || sub.Files["pkg/test_api.py"][0] != 2 {
+		t.Fatalf("second context = %+v, want line 2 only", sub)
+	}
+	// A report without contexts keeps the suite-level behaviour and carries no
+	// context at all.
+	without := []byte(`{"files":{"pkg/test_api.py":{"executed_lines":[1],"missing_lines":[],"summary":{"num_statements":1,"covered_lines":1,"missing_lines":0}}}}`)
+	plain, err := ParseCoverage(without, "coverage.py-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Contexts) != 0 {
+		t.Fatalf("a report without contexts produced contexts: %+v", plain.Contexts)
+	}
+	if plain.Files["pkg/test_api.py"].LinesFound != 1 || plain.Files["pkg/test_api.py"].LinesHit != 1 {
+		t.Fatalf("suite-level result changed: %+v", plain)
+	}
+}
+
 func TestResolveWithinRejectsTraversalAndSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

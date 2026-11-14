@@ -1,0 +1,2 @@
+>  NX  Running target test for project web
+>  NX  Killed: run exceeded the configured timeout of 1200000ms

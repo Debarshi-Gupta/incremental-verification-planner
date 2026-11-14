@@ -24,6 +24,27 @@ type ArtifactInfo struct {
 	ExpiresAt string    `json:"expires_at"`
 }
 
+// Artifact retrieval errors. The service layer maps storage and metadata
+// failures onto these so the HTTP layer can answer without disclosing
+// whether an artifact exists in another tenant.
+var (
+	// ErrArtifactUnavailable marks an artifact the authenticated tenant may
+	// not retrieve: absent, expired, unverified, or owned by another tenant.
+	// It is answered with a tenant-neutral 404 so artifact existence is
+	// never disclosed across tenants.
+	ErrArtifactUnavailable = errors.New("artifact is unavailable to this tenant")
+	// ErrArtifactStorageUnavailable marks a dependency that could not serve
+	// the request. Artifact storage is optional for plan correctness
+	// (LLD 1.3), so the API degrades with a retryable 503 instead of
+	// pretending the artifact does not exist.
+	ErrArtifactStorageUnavailable = errors.New("artifact storage is unavailable")
+	// ErrArtifactTooLarge marks an artifact beyond the configured bound.
+	ErrArtifactTooLarge = errors.New("artifact exceeds the configured size limit")
+	// ErrArtifactExecutionUnavailable marks an execution that is not
+	// available to the authenticated tenant.
+	ErrArtifactExecutionUnavailable = errors.New("execution is unavailable to this tenant")
+)
+
 type ArtifactService interface {
 	Upload(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, io.Reader) (ArtifactInfo, error)
 	Open(context.Context, uuid.UUID, uuid.UUID) (ArtifactInfo, io.ReadCloser, error)
@@ -89,12 +110,19 @@ func uploadArtifact(opts Options, slots chan struct{}) http.HandlerFunc {
 			status = http.StatusInternalServerError
 			code, message := "ARTIFACT_UPLOAD_FAILED", "artifact could not be stored"
 			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) || strings.Contains(err.Error(), "size limit") {
+			switch {
+			case errors.As(err, &maxErr) || errors.Is(err, ErrArtifactTooLarge):
 				status, code, message = http.StatusRequestEntityTooLarge, "ARTIFACT_TOO_LARGE", "artifact exceeds the configured size limit"
-			} else if strings.Contains(err.Error(), "execution") {
+			case errors.Is(err, ErrArtifactExecutionUnavailable):
 				status, code, message = http.StatusNotFound, "EXECUTION_NOT_FOUND", "execution is unavailable to this tenant"
-			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			case errors.Is(err, ErrArtifactStorageUnavailable):
+				status, code, message = http.StatusServiceUnavailable, "ARTIFACT_STORAGE_UNAVAILABLE", "artifact storage is unavailable"
+			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 				status, code, message = http.StatusRequestTimeout, "ARTIFACT_UPLOAD_INTERRUPTED", "artifact upload was interrupted"
+			case strings.Contains(err.Error(), "size limit"):
+				status, code, message = http.StatusRequestEntityTooLarge, "ARTIFACT_TOO_LARGE", "artifact exceeds the configured size limit"
+			case strings.Contains(err.Error(), "execution"):
+				status, code, message = http.StatusNotFound, "EXECUTION_NOT_FOUND", "execution is unavailable to this tenant"
 			}
 			writeError(w, r, &APIError{Status: status, Code: code, Message: message, Retryable: status >= 500 || status == http.StatusRequestTimeout})
 			return
@@ -136,8 +164,17 @@ func downloadArtifact(opts Options) http.HandlerFunc {
 		}
 		info, body, err := opts.Artifacts.Open(r.Context(), tenantID, artifactID)
 		if err != nil {
-			status = http.StatusNotFound
-			writeError(w, r, &APIError{Status: http.StatusNotFound, Code: "ARTIFACT_NOT_FOUND", Message: "artifact is unavailable to this tenant"})
+			switch {
+			case errors.Is(err, ErrArtifactStorageUnavailable):
+				status = http.StatusServiceUnavailable
+				writeError(w, r, &APIError{Status: status, Code: "ARTIFACT_STORAGE_UNAVAILABLE", Message: "artifact storage is unavailable", Retryable: true})
+			case errors.Is(err, ErrArtifactUnavailable):
+				status = http.StatusNotFound
+				writeError(w, r, &APIError{Status: status, Code: "ARTIFACT_NOT_FOUND", Message: "artifact is unavailable to this tenant"})
+			default:
+				status = http.StatusInternalServerError
+				writeError(w, r, toAPIError(err))
+			}
 			return
 		}
 		defer body.Close()

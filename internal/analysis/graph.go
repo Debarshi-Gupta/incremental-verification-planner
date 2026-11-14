@@ -3,14 +3,32 @@ package analysis
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ivp/ivp/internal/domain"
 )
 
+// AnalyzeImpact derives the impact of a change set from the immutable raw
+// graph. Callers that plan repeatedly against the same snapshot should use
+// DerivedIndexFor plus AnalyzeImpactIndexed so the adjacency lists, the
+// connected target mappings and the affected-target index are derived once
+// instead of once per request (LLD 13.3).
 func AnalyzeImpact(changes []domain.ChangedFile, nodes []domain.GraphNode, edges []domain.GraphEdge, policy domain.Policy, now time.Time, complete, missing, declaredConflict, declaredCycle bool) ImpactResult {
+	index := BuildDerivedIndex("", nodes, edges)
+	return AnalyzeImpactIndexed(changes, nodes, edges, index, policy, now, complete, missing, declaredConflict, declaredCycle)
+}
+
+// AnalyzeImpactIndexed is AnalyzeImpact over a precomputed derived index.
+// Traversal is bounded by the policy's traversal limits (LLD 13.3): when a
+// bound is reached the result is marked incomplete so the planner escalates;
+// the traversal is never silently truncated.
+func AnalyzeImpactIndexed(changes []domain.ChangedFile, nodes []domain.GraphNode, edges []domain.GraphEdge, index *DerivedIndex, policy domain.Policy, now time.Time, complete, missing, declaredConflict, declaredCycle bool) ImpactResult {
 	result := ImpactResult{ImpactedNodeIDs: make(map[domain.UUID]bool), MissingEdges: missing}
+	if index == nil {
+		index = BuildDerivedIndex("", nodes, edges)
+	}
 	nodeByID := make(map[domain.UUID]domain.GraphNode, len(nodes))
 	nodesByPath := make(map[string][]domain.GraphNode)
 	for _, n := range nodes {
@@ -42,25 +60,16 @@ func AnalyzeImpact(changes []domain.ChangedFile, nodes []domain.GraphNode, edges
 		}
 	}
 
-	reverseDeps := make(map[domain.UUID][]domain.UUID)
-	reverseCoverage := make(map[domain.UUID][]domain.UUID)
-	depAdj := make(map[domain.UUID][]domain.UUID)
-	for _, e := range edges {
-		if e.Conflict {
-			result.HasConflict = true
-		}
-		if e.EdgeType == domain.EdgeDependsOn {
-			// consumer -> dependency; use reverseDeps to find affected consumers.
-			depAdj[e.FromNodeID] = append(depAdj[e.FromNodeID], e.ToNodeID)
-			reverseDeps[e.ToNodeID] = append(reverseDeps[e.ToNodeID], e.FromNodeID)
-		}
-		if e.EdgeType == domain.EdgeTestCovers {
-			reverseCoverage[e.ToNodeID] = append(reverseCoverage[e.ToNodeID], e.FromNodeID)
-		}
+	reverseDeps := index.ReverseDeps
+	reverseCoverage := index.ReverseCoverage
+	depAdj := index.DependencyAdj
+	if index.HasConflict {
+		result.HasConflict = true
 	}
 	if declaredConflict {
 		result.HasConflict = true
 	}
+	limits := policy.TraversalLimits
 	queue := make([]domain.UUID, 0, len(changed))
 	for id := range changed {
 		queue = append(queue, id)
@@ -70,19 +79,45 @@ func AnalyzeImpact(changes []domain.ChangedFile, nodes []domain.GraphNode, edges
 	for _, id := range queue {
 		seen[id] = true
 	}
-	for len(queue) > 0 {
-		id := queue[0]
-		queue = queue[1:]
-		for _, consumer := range reverseDeps[id] {
-			if !seen[consumer] {
-				seen[consumer] = true
-				result.ImpactedNodeIDs[consumer] = true
-				queue = append(queue, consumer)
+	// Depth is tracked per node so the depth budget bounds the dependency
+	// chain that is followed, not the number of hops taken overall.
+	depth := make(map[domain.UUID]int, len(changed))
+	frontier := make([]domain.UUID, 0, len(changed))
+	frontier = append(frontier, queue...)
+	currentDepth := 0
+	visited := 0
+	for len(frontier) > 0 {
+		if limits.MaxDepth > 0 && currentDepth > limits.MaxDepth {
+			result.Incomplete = true
+			result.IncompleteReason = "dependency traversal exceeded the depth budget " + strconv.Itoa(limits.MaxDepth)
+			break
+		}
+		next := make([]domain.UUID, 0, len(frontier))
+		for _, id := range frontier {
+			visited++
+			if limits.MaxNodes > 0 && visited > limits.MaxNodes {
+				result.Incomplete = true
+				result.IncompleteReason = "dependency traversal exceeded the node budget " + strconv.Itoa(limits.MaxNodes)
+				frontier = nil
+				break
+			}
+			for _, consumer := range reverseDeps[id] {
+				if !seen[consumer] {
+					seen[consumer] = true
+					depth[consumer] = currentDepth + 1
+					result.ImpactedNodeIDs[consumer] = true
+					next = append(next, consumer)
+				}
+			}
+			for _, test := range reverseCoverage[id] {
+				result.ImpactedNodeIDs[test] = true
 			}
 		}
-		for _, test := range reverseCoverage[id] {
-			result.ImpactedNodeIDs[test] = true
+		if result.Incomplete {
+			break
 		}
+		currentDepth++
+		frontier = next
 	}
 	impactedDepAdj := make(map[domain.UUID][]domain.UUID)
 	for from, deps := range depAdj {

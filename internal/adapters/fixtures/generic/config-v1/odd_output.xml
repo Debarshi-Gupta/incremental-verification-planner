@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- runner tail: [32mok[0m | redaction candidates: password=hunter2 AKIAFAKEEXAMPLEKEY -->
+<testsuites>
+  <testsuite name="example.com/parser" tests="3" errors="0" failures="0" skipped="0" time="0.26">
+    <testcase name="TestПуть С Пробелами" classname="example.com/parser" time="0.05"/>
+    <testcase name="Test测试 naïve 🎉" classname="example.com/parser" time="0.06"/>
+    <testcase name="TestToken AKIAFAKEEXAMPLEKEY" classname="example.com/parser" time="0.03">
+      <system-out>login password=hunter2 from env; retry 0/3</system-out>
+    </testcase>
+  </testsuite>
+</testsuites>

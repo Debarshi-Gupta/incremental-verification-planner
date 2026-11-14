@@ -21,7 +21,7 @@ func (d *DB) LoadCoverageHistory(ctx context.Context, tenantID, repositoryID uui
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT DISTINCT ON (u.stable_key,n.path)
 			u.stable_key,n.stable_key,n.path,c.line_start,c.line_end,c.source,c.report_hash,c.run_id,c.observed_at,
-			c.environment_digest,c.build_config_digest,c.test_config_digest,c.precision,c.suite_level,c.test_specific,c.evidence_confidence
+			c.environment_digest,c.build_config_digest,c.test_config_digest,c.dependency_digest,c.adapter_version,c.precision,c.suite_level,c.test_specific,c.evidence_confidence
 			FROM coverage_observations c
 			JOIN test_units u ON u.id=c.test_unit_id AND u.snapshot_id=c.snapshot_id
 			JOIN graph_nodes n ON n.id=c.covered_node_id AND n.snapshot_id=c.snapshot_id
@@ -38,8 +38,8 @@ func (d *DB) LoadCoverageHistory(ctx context.Context, tenantID, repositoryID uui
 			var runID string
 			if err := rows.Scan(&observation.TestUnitKey, &observation.CoveredStableKey, &observation.CoveredPath, &observation.LineStart, &observation.LineEnd,
 				&observation.SourceType, &observation.ReportHash, &runID, &observation.ObservedAt, &observation.EnvironmentFingerprint,
-				&observation.BuildConfigDigest, &observation.TestConfigDigest, &observation.Precision, &observation.SuiteLevel,
-				&observation.TestSpecific, &observation.EvidenceConfidence); err != nil {
+				&observation.BuildConfigDigest, &observation.TestConfigDigest, &observation.DependencyDigest, &observation.AdapterVersion,
+				&observation.Precision, &observation.SuiteLevel, &observation.TestSpecific, &observation.EvidenceConfidence); err != nil {
 				return err
 			}
 			parsed, err := uuid.Parse(runID)

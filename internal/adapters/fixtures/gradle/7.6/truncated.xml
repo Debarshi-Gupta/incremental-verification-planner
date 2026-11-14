@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="com.example.AppTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-14T11:02:33.114Z" time="0.142">
+  <testcase name="transfers funds between accounts" classname="com.example.AppTest" time="0.041"/>
+  <testcase name="rejects overdraft" classname="com.example.AppTest" time="0.

@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ivp/ivp/internal/analysis"
 	"github.com/ivp/ivp/internal/adapters"
 	"github.com/ivp/ivp/internal/adapters/bazel"
 	"github.com/ivp/ivp/internal/adapters/generic"
@@ -27,6 +26,7 @@ import (
 	"github.com/ivp/ivp/internal/adapters/maven"
 	"github.com/ivp/ivp/internal/adapters/nx"
 	"github.com/ivp/ivp/internal/adapters/pytest"
+	"github.com/ivp/ivp/internal/analysis"
 	"github.com/ivp/ivp/internal/config"
 	"github.com/ivp/ivp/internal/domain"
 	"github.com/ivp/ivp/internal/gitutil"
@@ -72,6 +72,7 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 		fb, _ := fallbackInstruction(cfg)
 		fmt.Fprintf(out, "Windows does not support selective execution. Full-suite fallback argv: %s\n", fb)
 	}
+	codeownerRules := readCodeowners(root)
 	all := registry()
 	var units []domain.TestUnit
 	var nodes []domain.GraphNode
@@ -118,6 +119,7 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 	var sourceMappings []sourceMappingEvidence
 	sourceCoverageComplete := map[string]bool{}
 	buildDependencyComplete := map[string]bool{}
+	var trackedPaths []string
 	now := time.Now().UTC()
 	snapshotID := uuid.New()
 	for _, adapter := range all {
@@ -198,6 +200,13 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 				u.TargetRef = found.Key
 			}
 			u.Metadata = map[string]any{"display_name": found.DisplayName, "runner": found.Runner, "dependencies": append([]string(nil), found.Dependencies...), "report_paths": append([]string(nil), found.ReportPaths...), "coverage_paths": append([]string(nil), found.CoveragePaths...), "timeout_millis": found.Timeout.Milliseconds(), "trusted_config": found.TrustedConfig}
+			// Test ownership: the unit records the first CODEOWNERS owner of
+			// its first owned source path under the owner node's stable key,
+			// which is what the planner's owner mapping compares against
+			// (LLD line 458, ADR 0013).
+			if ownerKey := unitOwnerStableKey(codeownerRules, u.SourcePaths); ownerKey != "" {
+				u.Metadata["owner"] = ownerKey
+			}
 			u.LastSeenAt = now
 			units = append(units, u)
 			unitNodeID := uuid.New()
@@ -330,6 +339,7 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 			if path == "" {
 				continue
 			}
+			trackedPaths = append(trackedPaths, path)
 			addSourceNode(path, "git-index", map[string]any{"tracked": true})
 		}
 	}
@@ -422,6 +432,15 @@ func (c *commands) index(ctx context.Context, out io.Writer, cfg config.Config, 
 					Attributes: map[string]any{"precision": mapping.Precision, "path_pattern": mapping.PathPattern}})
 			}
 		}
+	}
+	// Convention-derived evidence (LLD 4.4, ADR 0013): ownership,
+	// configuration, generated-output, schema-consumer, and co-location
+	// edges over the tracked inventory. Producers emit nothing when their
+	// convention input is absent.
+	newNodes, conventionEdges := buildConventionEvidence(root, snapshotID, now, trackedPaths, nodes, codeownerRules)
+	nodes = append(nodes, newNodes...)
+	for _, edge := range conventionEdges {
+		appendEdge(edge)
 	}
 	if len(discovered) == 0 {
 		complete = false

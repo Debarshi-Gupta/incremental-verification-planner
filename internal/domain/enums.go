@@ -165,6 +165,26 @@ const (
 	OutcomeAuditIncomparable    ExecutionOutcome = "AUDIT_INCOMPARABLE"
 )
 
+// IsPassOutcome reports whether an execution outcome represents a passing
+// verification run.
+func IsPassOutcome(o ExecutionOutcome) bool {
+	return o == OutcomeTargetedPass || o == OutcomeFullVerificationPass
+}
+
+// IsAuditOutcome reports whether an execution outcome was set by audit
+// reclassification (ADR 0015).
+func IsAuditOutcome(o ExecutionOutcome) bool {
+	return o == OutcomeAuditMiss || o == OutcomeAuditPossibleMiss || o == OutcomeAuditIncomparable
+}
+
+// IsPassLikeOutcome reports whether an execution outcome counts as a passing
+// run for audit matching and classification. An AUDIT_* outcome can only be
+// reached from a passing outcome, so a re-audit classifies it by its
+// originating pass (ADR 0015).
+func IsPassLikeOutcome(o ExecutionOutcome) bool {
+	return IsPassOutcome(o) || IsAuditOutcome(o)
+}
+
 const (
 	AuditNoMissObserved AuditOutcome = "NO_MISS_OBSERVED"
 	AuditPossibleMiss   AuditOutcome = "POSSIBLE_MISS"

@@ -16,12 +16,16 @@ tags:
   - name: Audits
 paths:
   /health/live:
+    servers:
+      - url: /
     get:
       tags: [Health]
       security: []
       responses:
         '200': { description: Process is alive }
   /health/ready:
+    servers:
+      - url: /
     get:
       tags: [Health]
       security: []

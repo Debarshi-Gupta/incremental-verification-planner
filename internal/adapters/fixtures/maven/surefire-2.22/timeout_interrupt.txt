@@ -1,0 +1,5 @@
+[INFO] Running com.example.AccountServiceTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.101 s
+[WARNING] The forked VM terminated without properly saying goodbye. Exit code is 143
+[ERROR] >>> Timeout exceeded; surefire fork did not send a heartbeat
+[ERROR] BUILD FAILURE

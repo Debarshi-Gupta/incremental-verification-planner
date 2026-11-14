@@ -1,0 +1,12 @@
+py_library(
+    name = "service",
+    srcs = ["service.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//common:math"],
+)
+
+py_test(
+    name = "service_test",
+    srcs = ["service_test.py"],
+    deps = [":service"],
+)

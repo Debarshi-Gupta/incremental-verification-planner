@@ -2,6 +2,10 @@
 ALTER TABLE repository_snapshots ADD COLUMN test_config_digest text NOT NULL DEFAULT '';
 UPDATE repository_snapshots SET test_config_digest=config_digest WHERE test_config_digest='';
 
+-- The dollar-quoted body is wrapped in goose statement annotations so the
+-- migration runner sends the whole block to PostgreSQL instead of splitting
+-- it at the semicolons inside the body.
+-- +goose StatementBegin
 DO $$
 DECLARE item record;
 BEGIN
@@ -15,6 +19,7 @@ BEGIN
     EXECUTE format('ALTER TABLE repository_snapshots DROP CONSTRAINT %I', item.conname);
   END LOOP;
 END $$;
+-- +goose StatementEnd
 
 CREATE UNIQUE INDEX repository_snapshot_identity ON repository_snapshots
   (repository_id,commit_sha,base_sha,tree_hash,worktree_hash,submodule_digest,toolchain_digest,config_digest,test_config_digest,adapter_digest,graph_version,completeness_json);

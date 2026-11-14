@@ -1,0 +1,2 @@
+{"id": {"started": {"eventName": "BUILD"}}, "started": {"exitCode": 0, "success": true}}
+{"id":{"testSummary":{"label":"//:all"}},"testSummary":{"overallStatus":"PASSED","totalRunCount":3,"passed":3,"failed":

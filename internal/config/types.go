@@ -21,14 +21,15 @@ type RepositoryConfig struct {
 }
 
 type AnalysisConfig struct {
-	BaseRef                          string `yaml:"base_ref" json:"base_ref"`
-	FollowRenames                    bool   `yaml:"follow_renames" json:"follow_renames"`
-	IncludeUntracked                 bool   `yaml:"include_untracked" json:"include_untracked"`
-	MaxChangedFilesForSelectivePlan  int    `yaml:"max_changed_files_for_selective_plan" json:"max_changed_files_for_selective_plan"`
-	GraphStalenessMinutes            int    `yaml:"graph_staleness_minutes" json:"graph_staleness_minutes"`
-	CoverageStalenessDays            int    `yaml:"coverage_staleness_days" json:"coverage_staleness_days"`
-	HistoryWindowDays                int    `yaml:"history_window_days" json:"history_window_days"`
-	RequireCleanDependencyResolution bool   `yaml:"require_clean_dependency_resolution" json:"require_clean_dependency_resolution"`
+	BaseRef                            string `yaml:"base_ref" json:"base_ref"`
+	FollowRenames                      bool   `yaml:"follow_renames" json:"follow_renames"`
+	IncludeUntracked                   bool   `yaml:"include_untracked" json:"include_untracked"`
+	MaxChangedFilesForSelectivePlan    int    `yaml:"max_changed_files_for_selective_plan" json:"max_changed_files_for_selective_plan"`
+	GraphStalenessMinutes              int    `yaml:"graph_staleness_minutes" json:"graph_staleness_minutes"`
+	CoverageStalenessDays              int    `yaml:"coverage_staleness_days" json:"coverage_staleness_days"`
+	HistoryWindowDays                  int    `yaml:"history_window_days" json:"history_window_days"`
+	FlakeMinimumComparableObservations int    `yaml:"flake_minimum_comparable_observations" json:"flake_minimum_comparable_observations"`
+	RequireCleanDependencyResolution   bool   `yaml:"require_clean_dependency_resolution" json:"require_clean_dependency_resolution"`
 }
 
 type ServerConfig struct {
@@ -75,12 +76,37 @@ type SelectionConfig struct {
 }
 
 type SafetyConfig struct {
-	HardFullSuitePaths        []string    `yaml:"hard_full_suite_paths" json:"hard_full_suite_paths"`
-	HardFullSuiteRiskLabels   []string    `yaml:"hard_full_suite_risk_labels" json:"hard_full_suite_risk_labels"`
-	AlwaysRunCheckIDs         []string    `yaml:"always_run_check_ids" json:"always_run_check_ids"`
-	CriticalPathPatterns      []string    `yaml:"critical_path_patterns" json:"critical_path_patterns"`
-	DocumentationPathPatterns []string    `yaml:"documentation_path_patterns" json:"documentation_path_patterns"`
-	Audit                     AuditConfig `yaml:"audit" json:"audit"`
+	HardFullSuitePaths        []string                  `yaml:"hard_full_suite_paths" json:"hard_full_suite_paths"`
+	HardFullSuiteRiskLabels   []string                  `yaml:"hard_full_suite_risk_labels" json:"hard_full_suite_risk_labels"`
+	AlwaysRunCheckIDs         []string                  `yaml:"always_run_check_ids" json:"always_run_check_ids"`
+	CriticalPathPatterns      []string                  `yaml:"critical_path_patterns" json:"critical_path_patterns"`
+	DocumentationPathPatterns []string                  `yaml:"documentation_path_patterns" json:"documentation_path_patterns"`
+	ReviewedExclusions        []ReviewedExclusionConfig `yaml:"reviewed_exclusions" json:"reviewed_exclusions"`
+	HardPathExceptions        []HardPathExceptionConfig `yaml:"hard_path_exceptions" json:"hard_path_exceptions"`
+	Audit                     AuditConfig               `yaml:"audit" json:"audit"`
+}
+
+// ReviewedExclusionConfig is a reviewed decision to keep one unit out of
+// selectable plans. Every field is mandatory and reviewed_at is a calendar
+// date in UTC (ADR 0013).
+type ReviewedExclusionConfig struct {
+	UnitKey    string `yaml:"unit_key" json:"unit_key"`
+	Reviewer   string `yaml:"reviewer" json:"reviewer"`
+	ReviewedAt string `yaml:"reviewed_at" json:"reviewed_at"`
+	Rationale  string `yaml:"rationale" json:"rationale"`
+}
+
+// HardPathExceptionConfig is a reviewed, narrow exception to one hard
+// full-suite rule (ADR 0019): path is the changed-file glob, rule names which
+// escalation it covers, and reviewer/reviewed_at/rationale carry the review
+// trail. Every field is mandatory and reviewed_at is a calendar date in UTC
+// (ADR 0013's date contract).
+type HardPathExceptionConfig struct {
+	Path       string `yaml:"path" json:"path"`
+	Rule       string `yaml:"rule" json:"rule"`
+	Reviewer   string `yaml:"reviewer" json:"reviewer"`
+	ReviewedAt string `yaml:"reviewed_at" json:"reviewed_at"`
+	Rationale  string `yaml:"rationale" json:"rationale"`
 }
 
 type AuditConfig struct {
@@ -91,15 +117,24 @@ type AuditConfig struct {
 	QuarantineOnConfirmedMiss      bool    `yaml:"quarantine_on_confirmed_miss" json:"quarantine_on_confirmed_miss"`
 	QuarantineHours                int     `yaml:"quarantine_hours" json:"quarantine_hours"`
 	RepeatFailedTestCount          int     `yaml:"repeat_failed_test_count" json:"repeat_failed_test_count"`
+	// ScheduledCadenceHours is the LLD 10.2 scheduled-audit cadence: every
+	// repository must run a full verification at least once per cadence even
+	// when no random audit was sampled. The shipped default is 24 hours
+	// (daily). It is a positive interval in hours.
+	ScheduledCadenceHours int `yaml:"scheduled_cadence_hours" json:"scheduled_cadence_hours"`
+	// AcknowledgementSLAHours is the LLD 15.3 response SLA for an audit miss:
+	// a recorded miss must be acknowledged by a maintainer within this
+	// interval. The shipped default is 24 hours.
+	AcknowledgementSLAHours int `yaml:"acknowledgement_sla_hours" json:"acknowledgement_sla_hours"`
 }
 
 // ExecutionConfig is local-only execution metadata. full_suite_argv is always
 // passed as an argv array and is never placed in a server-generated plan.
 type ExecutionConfig struct {
-	FullSuiteArgv  []string `yaml:"full_suite_argv" json:"full_suite_argv"`
-	TimeoutSeconds int      `yaml:"timeout_seconds" json:"timeout_seconds"`
-	MaxOutputBytes int      `yaml:"max_output_bytes" json:"max_output_bytes"`
-	FailureRetryCount int    `yaml:"failure_retry_count" json:"failure_retry_count"`
+	FullSuiteArgv     []string `yaml:"full_suite_argv" json:"full_suite_argv"`
+	TimeoutSeconds    int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	MaxOutputBytes    int      `yaml:"max_output_bytes" json:"max_output_bytes"`
+	FailureRetryCount int      `yaml:"failure_retry_count" json:"failure_retry_count"`
 }
 
 type AdaptersConfig struct {
@@ -123,14 +158,18 @@ type GradleConfig struct {
 type MavenConfig struct {
 	Enabled          bool `yaml:"enabled" json:"enabled"`
 	WrapperPreferred bool `yaml:"wrapper_preferred" json:"wrapper_preferred"`
-	SurefireEnabled  bool `yaml:"surefire_enabled" json:"surefire_enabled"`
-	FailsafeEnabled  bool `yaml:"failsafe_enabled" json:"failsafe_enabled"`
-	CoveragePaths    []string `yaml:"coverage_paths" json:"coverage_paths"`
+	// SurefireEnabled and FailsafeEnabled are tri-state: nil means the key
+	// was unset, which keeps the provider enabled with the adapter's default
+	// behavior. Only an explicit false disables a provider, so a missing key
+	// never silently means "disabled".
+	SurefireEnabled *bool    `yaml:"surefire_enabled,omitempty" json:"surefire_enabled,omitempty"`
+	FailsafeEnabled *bool    `yaml:"failsafe_enabled,omitempty" json:"failsafe_enabled,omitempty"`
+	CoveragePaths   []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type BazelConfig struct {
-	Enabled                     bool `yaml:"enabled" json:"enabled"`
-	UseConfiguredTargetPatterns bool `yaml:"use_configured_target_patterns" json:"use_configured_target_patterns"`
+	Enabled                     bool     `yaml:"enabled" json:"enabled"`
+	UseConfiguredTargetPatterns bool     `yaml:"use_configured_target_patterns" json:"use_configured_target_patterns"`
 	CoveragePaths               []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
@@ -141,14 +180,14 @@ type NxConfig struct {
 }
 
 type PytestConfig struct {
-	Enabled    bool   `yaml:"enabled" json:"enabled"`
-	ConfigFile string `yaml:"config_file" json:"config_file"`
+	Enabled       bool     `yaml:"enabled" json:"enabled"`
+	ConfigFile    string   `yaml:"config_file" json:"config_file"`
 	CoveragePaths []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 
 type JestConfig struct {
-	Enabled         bool `yaml:"enabled" json:"enabled"`
-	ConfigDiscovery bool `yaml:"config_discovery" json:"config_discovery"`
+	Enabled         bool     `yaml:"enabled" json:"enabled"`
+	ConfigDiscovery bool     `yaml:"config_discovery" json:"config_discovery"`
 	CoveragePaths   []string `yaml:"coverage_paths" json:"coverage_paths"`
 }
 

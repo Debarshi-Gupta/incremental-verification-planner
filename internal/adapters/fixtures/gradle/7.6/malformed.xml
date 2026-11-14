@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="com.example.AppTest" tests="2" skipped="0" failures="1" errors="0" timestamp="2026-09-14T11:02:33.114Z" time="0.067">
+  <testcase name="transfers funds between accounts" classname="com.example.AppTest" time="0.041"/>
+  <testcase name="rejects overdraft" classname="com.example.AppTest" time="0.021">
+    <failure message="expected <100.00> but was <90.00>" type="AssertionFailedError">values differ</failure>
+  </testcase>
+</testsuite>

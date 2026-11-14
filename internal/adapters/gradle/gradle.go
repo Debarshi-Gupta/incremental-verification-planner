@@ -15,10 +15,22 @@ import (
 	"github.com/ivp/ivp/internal/adapters/native"
 )
 
-type Adapter struct{ native.Base }
+type Adapter struct {
+	native.Base
+	// capture is an injectable command seam for fixture tests. When nil (the
+	// default), every command runs through adapters.RunCapture unchanged.
+	capture func(ctx context.Context, root, executable string, args []string, limit int64) ([]byte, []byte, error)
+}
 
 func New() *Adapter {
-	return &Adapter{native.Base{Name: "gradle", Binary: "gradle", Caps: adapters.Capabilities{SelectableGranularity: "GRADLE_TASK", DependencyPrecision: "TASK_GRAPH", CoveragePrecision: "CLASS_OR_FILE", DiscoveryReliable: true, ResultFormats: []string{"junit-xml"}, SupportsCoverage: true, SupportsFiltering: true}}}
+	return &Adapter{Base: native.Base{Name: "gradle", Binary: "gradle", Caps: adapters.Capabilities{SelectableGranularity: "GRADLE_TASK", DependencyPrecision: "TASK_GRAPH", CoveragePrecision: "CLASS_OR_FILE", DiscoveryReliable: true, ResultFormats: []string{"junit-xml"}, SupportsCoverage: true, SupportsFiltering: true}}}
+}
+
+func (a *Adapter) runCapture(ctx context.Context, root, executable string, args []string, limit int64) ([]byte, []byte, error) {
+	if a.capture != nil {
+		return a.capture(ctx, root, executable, args, limit)
+	}
+	return adapters.RunCapture(ctx, root, executable, args, limit)
 }
 func (a *Adapter) ID() string { return "gradle" }
 func (a *Adapter) tool(root string) string {
@@ -35,7 +47,7 @@ func (a *Adapter) Detect(_ context.Context, root string) (adapters.Detection, er
 	return d, e
 }
 func (a *Adapter) Version(ctx context.Context, root string) (string, error) {
-	stdout, stderr, e := adapters.RunCapture(ctx, root, a.tool(root), []string{"--version"}, 64<<10)
+	stdout, stderr, e := a.runCapture(ctx, root, a.tool(root), []string{"--version"}, 64<<10)
 	if e != nil {
 		return "", e
 	}
@@ -92,7 +104,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 		return adapters.DiscoveryResult{Complete: false, Reasons: []string{e.Error()}}, e
 	}
 	tool := a.tool(req.Root)
-	out, _, err := adapters.RunCapture(ctx, req.Root, tool, []string{"projects", "--console=plain"}, req.MaxOutputBytes)
+	out, _, err := a.runCapture(ctx, req.Root, tool, []string{"projects", "--console=plain"}, req.MaxOutputBytes)
 	if err != nil {
 		return adapters.DiscoveryResult{Complete: false, Reasons: []string{"Gradle project discovery failed"}}, err
 	}
@@ -129,7 +141,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 		if project != "" {
 			args = append([]string{project + ":tasks"}, args[1:]...)
 		}
-		data, _, runErr := adapters.RunCapture(ctx, req.Root, tool, args, req.MaxOutputBytes)
+		data, _, runErr := a.runCapture(ctx, req.Root, tool, args, req.MaxOutputBytes)
 		if runErr != nil {
 			result.Complete = false
 			result.Reasons = append(result.Reasons, "Gradle task discovery failed for "+project)
@@ -175,7 +187,7 @@ func (a *Adapter) Discover(ctx context.Context, req adapters.DiscoverRequest) (a
 		if project != "" {
 			args[0] = project + ":dependencies"
 		}
-		data, _, dependencyErr := adapters.RunCapture(ctx, req.Root, tool, args, req.MaxOutputBytes)
+		data, _, dependencyErr := a.runCapture(ctx, req.Root, tool, args, req.MaxOutputBytes)
 		if dependencyErr != nil {
 			result.Complete = false
 			result.Reasons = append(result.Reasons, "Gradle project dependency discovery failed for "+project)
@@ -302,8 +314,23 @@ func (a *Adapter) Materialize(_ context.Context, req adapters.MaterializeRequest
 	return adapters.ExecutionCommand{Executable: tool, Args: args, WorkingDirectory: cwd, Environment: map[string]string{}, Timeout: timeout, RedactEnv: append([]string(nil), req.Config.RedactEnv...), MaxOutputBytes: out, TargetKey: key, ReportPaths: []string{report}, CoveragePaths: append([]string(nil), req.Config.CoveragePaths...), Filtered: len(filters) > 0}, nil
 }
 
+// supportsGradleTestFilter reports whether the adapter may narrow the task
+// with --tests.
+//
+// The adapter cannot ask Gradle for a task's type without executing project
+// build logic, so the decision uses Gradle's naming convention only: a Test
+// task is named "test" or "<name>Test" with a camel-case word boundary
+// ("integrationTest", "unitTest"). Compile and lifecycle tasks
+// ("compileTestJava", "compileTestKotlin", "testClasses") and names that
+// merely contain "test" as a substring ("latest") are not Test tasks by
+// convention, so they run the whole task (LLD §8.2 line 590). This stays a
+// candidate-level name gate rather than task typing; the execution-time
+// zero-test check remains the correctness guard (ADR 0008).
 func supportsGradleTestFilter(task string) bool {
-	return strings.EqualFold(task, "test") || strings.HasSuffix(strings.ToLower(task), "test")
+	if strings.EqualFold(task, "test") {
+		return true
+	}
+	return strings.HasSuffix(task, "Test")
 }
 
 func moduleFromTaskKey(key string) string {

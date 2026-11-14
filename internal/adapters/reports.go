@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -408,7 +409,7 @@ func ParseCoverageReports(root string, paths []string, format string, limit int6
 	if len(data) == 0 {
 		return CoverageResult{Format: format, Complete: false, Reasons: []string{"no readable coverage report"}}, errors.New("no readable coverage report")
 	}
-	out := CoverageResult{Format: format, Complete: true, Files: map[string]FileCoverage{}}
+	out := CoverageResult{Format: format, Complete: true, Files: map[string]FileCoverage{}, Contexts: map[string]ContextCoverage{}}
 	for _, report := range data {
 		current, parseErr := ParseCoverage(report, format)
 		normalizeCoveragePaths(root, &current)
@@ -423,10 +424,28 @@ func ParseCoverageReports(root string, paths []string, format string, limit int6
 			old.LinesHit += cov.LinesHit
 			out.Files[path] = old
 		}
+		// Per-test contexts are merged across reports (LLD 8.6).
+		for name, context := range current.Contexts {
+			merged := out.Contexts[name]
+			if merged.Files == nil {
+				merged.Files = map[string][]int{}
+			}
+			for path, lines := range context.Files {
+				merged.Files[path] = append(merged.Files[path], lines...)
+			}
+			out.Contexts[name] = merged
+		}
 	}
 	for _, cov := range out.Files {
 		out.LinesFound += cov.LinesFound
 		out.LinesHit += cov.LinesHit
+	}
+	for name, context := range out.Contexts {
+		for path, lines := range context.Files {
+			sort.Ints(lines)
+			context.Files[path] = uniqueInts(lines)
+		}
+		out.Contexts[name] = context
 	}
 	if out.LinesFound > 0 {
 		out.LineCoverage = float64(out.LinesHit) / float64(out.LinesFound)
@@ -468,6 +487,32 @@ func normalizeCoveragePaths(root string, result *CoverageResult) {
 		normalized[filepath.ToSlash(rel)] = cov
 	}
 	result.Files = normalized
+	// Per-test contexts carry their own file paths, which must be normalized
+	// the same way (LLD 8.6).
+	if len(result.Contexts) == 0 {
+		return
+	}
+	normalizedContexts := make(map[string]ContextCoverage, len(result.Contexts))
+	for name, context := range result.Contexts {
+		files := make(map[string][]int, len(context.Files))
+		for path, lines := range context.Files {
+			path = strings.ReplaceAll(path, "\\", string(filepath.Separator))
+			abs, err := ResolveWithin(absRoot, path)
+			if err != nil {
+				result.Complete = false
+				result.Reasons = append(result.Reasons, "coverage context path escaped repository root")
+				continue
+			}
+			rel, err := filepath.Rel(absRoot, abs)
+			if err != nil {
+				result.Complete = false
+				continue
+			}
+			files[filepath.ToSlash(rel)] = lines
+		}
+		normalizedContexts[name] = ContextCoverage{Files: files}
+	}
+	result.Contexts = normalizedContexts
 }
 
 func ParseCoverage(data []byte, format string) (CoverageResult, error) {
@@ -501,6 +546,9 @@ func parseCoveragePyJSON(data []byte) (CoverageResult, error) {
 			ExecutedLines []int        `json:"executed_lines"`
 			MissingLines  []int        `json:"missing_lines"`
 			Summary       *fileSummary `json:"summary"`
+			// Contexts maps a line number to the test contexts that executed
+			// it (coverage.py's per-test contexts, LLD 8.6).
+			Contexts map[string][]string `json:"contexts"`
 		} `json:"files"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -514,7 +562,7 @@ func parseCoveragePyJSON(data []byte) (CoverageResult, error) {
 	if len(report.Files) == 0 {
 		return CoverageResult{Format: format, Complete: false, Reasons: []string{"coverage.py JSON contains no files"}}, errors.New("coverage.py JSON contains no files")
 	}
-	out := CoverageResult{Format: format, Complete: true, Files: make(map[string]FileCoverage, len(report.Files))}
+	out := CoverageResult{Format: format, Complete: true, Files: make(map[string]FileCoverage, len(report.Files)), Contexts: map[string]ContextCoverage{}}
 	for path, file := range report.Files {
 		if strings.TrimSpace(path) == "" {
 			return CoverageResult{Format: format, Complete: false, Reasons: []string{"coverage.py JSON contains an empty file path"}}, errors.New("coverage.py JSON contains an empty file path")
@@ -549,11 +597,53 @@ func parseCoveragePyJSON(data []byte) (CoverageResult, error) {
 		out.Files[filepath.ToSlash(path)] = FileCoverage{LinesFound: found, LinesHit: hit}
 		out.LinesFound += found
 		out.LinesHit += hit
+		// Per-test contexts (LLD 8.6): coverage.py records, per file, which
+		// test contexts executed which line. They are kept per context so the
+		// coverage can be attributed to the test that produced it.
+		for lineKey, contextNames := range file.Contexts {
+			line, convErr := strconv.Atoi(lineKey)
+			if convErr != nil || line <= 0 {
+				return CoverageResult{Format: format, Complete: false, Reasons: []string{"coverage.py JSON contains an invalid context line number"}}, errors.New("coverage.py JSON contains an invalid context line number")
+			}
+			for _, name := range contextNames {
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
+				context := out.Contexts[name]
+				if context.Files == nil {
+					context.Files = map[string][]int{}
+				}
+				context.Files[filepath.ToSlash(path)] = append(context.Files[filepath.ToSlash(path)], line)
+				out.Contexts[name] = context
+			}
+		}
+	}
+	for name, context := range out.Contexts {
+		for path, lines := range context.Files {
+			sort.Ints(lines)
+			context.Files[path] = lines
+		}
+		out.Contexts[name] = context
 	}
 	if out.LinesFound > 0 {
 		out.LineCoverage = float64(out.LinesHit) / float64(out.LinesFound)
 	}
 	return out, nil
+}
+
+// uniqueInts removes duplicates from a sorted list of line numbers.
+func uniqueInts(values []int) []int {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func parseLCOV(data []byte) (CoverageResult, error) {
