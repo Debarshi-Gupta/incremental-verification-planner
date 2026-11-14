@@ -1615,16 +1615,19 @@
       "section_title": "Responsibilities",
       "source_line": 129,
       "text": "Store immutable repository snapshots and versioned evidence.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/",
-        "internal/persistence/snapshot_read.go",
-        "internal/persistence/queries/repositories.sql"
+        "internal/persistence/migrations/001_init.sql installs the immutable-row trigger on repository_snapshots, graph_nodes, graph_edges, coverage_observations and the audit tables, and the tenant isolation policies; internal/persistence/repositories.go writes snapshots and versioned evidence in one transaction."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestStoredGraphAndAuditHistoryAreImmutable (internal/persistence/evidence_integration_test.go:140) runs against a real PostgreSQL: an UPDATE of a stored snapshot is rejected by the immutable-row trigger, and the snapshot, its graph node and the audit rows survive as the immutable source of truth."
+      ],
       "limitations": [
-        "Immutable snapshots and versioned evidence implemented via DB immutability triggers/RLS in migrations 001-005; immutability and isolation assertions execute only against PostgreSQL (TestPostgresMigrationsAndTenantIsolation — CI-only, BLOCKED locally)."
+        "The immutability guarantee is enforced by the database trigger; a superuser connection can disable it, which is why the application role must not own the tables."
       ]
     },
     {
@@ -1968,14 +1971,19 @@
       "section_title": "Repository snapshot",
       "source_line": 175,
       "text": "Snapshots are immutable after creation.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/service/backend.go:100,343"
+        "internal/persistence/migrations/001_init.sql installs the immutable_row trigger on repository_snapshots; internal/service/backend.go answers a fingerprint mismatch with SNAPSHOT_STALE."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestStoredGraphAndAuditHistoryAreImmutable (internal/persistence/evidence_integration_test.go:140) asserts against a real PostgreSQL that an UPDATE of a stored snapshot row is rejected, so a snapshot is immutable after creation."
+      ],
       "limitations": [
-        "Snapshot creation returns immutable:true (backend.go:100) and any fingerprint mismatch yields SNAPSHOT_STALE (backend.go:343); the database-level immutability assertion exists only in the PostgreSQL integration test (postgres_integration_test.go:147-153), which cannot run locally without Docker/Postgres — CI-only verification."
+        "The database trigger is the enforcement; the application-level fingerprint check only detects a stale reference."
       ]
     },
     {
@@ -2421,17 +2429,19 @@
       "section_title": "Test unit",
       "source_line": 226,
       "text": "Flake rate must be based on a configurable rolling window and record the sample size.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/history.go:20,30-37,55-57",
-        "internal/config/precedence.go:158",
-        "internal/service/backend.go:326",
-        "internal/config/validate.go:27"
+        "internal/persistence/history.go:19-63 ApplyTestHistory aggregates the comparable observations inside the configured rolling window and records the sample size, the failure count and the flake rate on the unit; internal/config/precedence.go maps the configured window into the policy."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestFlakeRateUsesTheConfiguredRollingWindow (internal/persistence/evidence_integration_test.go:258) asserts against a real PostgreSQL that a 24 hour window counts only the two observations inside it (sample size 2, two historical failures, flake rate 1) while an observation outside the window is excluded, and that a one hour window yields no sample at all."
+      ],
       "limitations": [
-        "The rolling window flows config -> policy -> SQL: HistoryWindowDays is bounded 1..3650 (validate.go:27), mapped to policy.HistoryWindow (precedence.go:158), passed into ApplyTestHistory (backend.go:326), used as the cutoff (history.go:20,36); sample size is recorded as DurationSampleCount and FlakeRate = flaky/samples (history.go:55-57). Requires PostgreSQL — CI-only execution."
+        "The window is measured from the read time, so a report older than the window is excluded rather than aged."
       ]
     },
     {
@@ -4190,15 +4200,20 @@
       "section_title": "Planning stages",
       "source_line": 446,
       "text": "The repository is in quarantine after a confirmed or unresolved regression miss for the relevant adapter/rule/scope.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/analysis/planner.go:174-177",
-        "internal/service/backend.go (quarantine gating)"
+        "internal/analysis/planner.go escalates with EscQuarantineActive when the effective policy carries an active quarantine; internal/service/backend.go sets the quarantine flag from the persisted quarantine rows of the adapter scope."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test -tags integration ./internal/service/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestQuarantineEscalatesThePlanToFullVerification (internal/analysis/history_quarantine_test.go:12) asserts that a quarantined policy produces a FULL_REQUIRED plan with the QUARANTINE_ACTIVE escalation recorded as a triggered hard rule.",
+        "PASS on 2026-11-14: TestExpiredQuarantineStillGatesUntilCleared (internal/service/quarantine_gating_integration_test.go:52) asserts against a real PostgreSQL that an expired quarantine still gates the scope until it is cleared."
+      ],
       "limitations": [
-        "policy.Quarantined escalates to EscQuarantineActive (planner.go:174-177) but no local test asserts it; quarantine gating is covered only by the integration-tagged TestExpiredQuarantineStillGatesUntilCleared (quarantine_gating_integration_test.go:52), which requires Docker/testcontainers and cannot run locally - CI-only verification."
+        "The gate applies to the adapter scope of the quarantine; a scope that was never quarantined is unaffected."
       ]
     },
     {
@@ -4318,15 +4333,19 @@
       "section_title": "Planning stages",
       "source_line": 457,
       "text": "Tests historically failing on the changed entity or related dependency edge.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/analysis/planner.go:246-256,644,653",
-        "internal/persistence/history.go:15-64"
+        "internal/analysis/planner.go attaches the comparable failure history of the changed entity to the candidate and adds the HISTORICAL_FAILURE_RELEVANCE reason; internal/persistence/history.go supplies the comparable failures per stable test key."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test -tags integration ./internal/persistence/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestHistoricalFailureRelevanceIsAppliedAndClamped (internal/analysis/history_quarantine_test.go:37) asserts that a comparable failure on the changed key gives the selected unit the HISTORICAL_FAILURE_RELEVANCE reason and contributes to the risk score."
+      ],
       "limitations": [
-        "Historical failures are attached only to impacted entities the candidate can exercise (planner.go:246-256) and feed a bounded historyGain (:644,653), but no test supplies HistoricalFailures to assert selection bias; the SQL history path (history.go) requires PostgreSQL - CI-only."
+        "Only comparable failures of the changed key (or of a related dependency edge) are relevant evidence; an incomparable observation is ignored."
       ]
     },
     {
@@ -4505,15 +4524,19 @@
       "section_title": "Planning stages",
       "source_line": 484,
       "text": "Relevant regression/failure history: 0–10.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/analysis/risk.go (history feature)",
-        "internal/persistence/history.go:15-64"
+        "internal/analysis/risk.go:88-94 computes the regression-history contribution as min(failures*2, 10) points, so the contribution is clamped to the documented 0-10 range."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestHistoricalFailureRelevanceIsAppliedAndClamped (internal/analysis/history_quarantine_test.go:37) asserts that nine comparable failures contribute exactly the clamped 10 points of the regression-history risk contribution."
+      ],
       "limitations": [
-        "Regression-history contribution is clamped to 0-10 but no test supplies failure history to assert it; the history data path requires PostgreSQL - CI-only."
+        "The contribution is a risk signal, not a selection decision: it never selects a unit on its own."
       ]
     },
     {
@@ -5209,17 +5232,19 @@
       "section_title": "Modes",
       "source_line": 543,
       "text": "This mode is mandatory before enabling selective CI gating for a repository.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/reads.go:97-118",
-        "internal/service/backend.go:244-252",
-        "internal/analysis/planner.go:105-106",
-        "internal/config/defaults.go:16"
+        "internal/persistence/reads.go CalibrationCounts counts only the completed OBSERVE-mode runs with usable timing; internal/service/backend.go feeds the counts into the served policy and internal/analysis/planner.go escalates a RISK_BASED_CI plan without approval or calibration."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestCalibrationCountsScopedToObserveModeExecutions (internal/persistence/quarantine_calibration_integration_test.go:183) runs against a real PostgreSQL and asserts that the calibration counts only the completed OBSERVE-mode executions with usable timing, which is what gates the selective CI mode."
+      ],
       "limitations": [
-        "Calibration gating exists: CalibrationCounts counts only completed OBSERVE-mode runs with usable timing (reads.go:97-118), feeds the served policy (backend.go:244-252), and RISK_BASED_CI without approval/calibration escalates to FULL_REQUIRED (planner.go:105-106). Direct assertion is CI-only: TestCalibrationCountsScopedToObserveModeExecutions (quarantine_calibration_integration_test.go:183-259, tag integration) requires PostgreSQL; the planner gate has no local test, and config_test.go:181-202 exercises config.Effective, which has no production caller."
+        "The counts cover a rolling window; a repository that has not run an OBSERVE-mode execution stays uncalibrated."
       ]
     },
     {
@@ -5268,16 +5293,20 @@
       "section_title": "Modes",
       "source_line": 546,
       "text": "A passing result is labelled TARGETED_PASS, never FULL_VERIFICATION_PASS.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/execution/runner.go:341,401",
-        "internal/persistence/plans_executions.go:442-455",
-        "internal/domain/enums.go:157"
+        "internal/execution/runner.go labels a passing full-suite run FULL_VERIFICATION_PASS and a passing selective run TARGETED_PASS; internal/persistence/plans_executions.go:515-533 rejects every mislabelled submission."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/execution/ -count=1",
+        "go test -tags integration ./internal/persistence/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestPassingResultIsLabelledByWhatActuallyRan (internal/execution/labeling_test.go:17) asserts that a passing full-suite run is labelled FULL_VERIFICATION_PASS and (where the platform allows selective execution) a passing selective run is labelled TARGETED_PASS.",
+        "PASS on 2026-11-14: TestMislabelledResultIsRejected (internal/persistence/evidence_integration_test.go:218) asserts against a real PostgreSQL that the server refuses a targeted pass for a full-suite execution ('full verification execution cannot be labeled targeted pass')."
+      ],
       "limitations": [
-        "Passing selective results are labeled TARGETED_PASS (runner.go:341,401) and the server rejects mislabels - 'full verification execution cannot be labeled targeted pass', 'full mode cannot be labeled as a targeted execution', 'only a ready selective plan may be labeled targeted pass' (plans_executions.go:442-455). No test asserts the labeling: execution tests never check the outcome, and the server rejection runs only in the PostgreSQL path (CI-only); planner_test.go:28 asserts the plan explanation, not a result label."
+        "The runner refuses selective execution on Windows, so the selective half of the labelling assertion is exercised on the Linux and macOS runners; the server-side rejection of a mislabel is asserted on every platform."
       ]
     },
     {
@@ -5567,15 +5596,19 @@
       "section_title": "Confidence and calibration",
       "source_line": 562,
       "text": "It must not auto-clear solely because time passed.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/audits.go:211-252",
-        "internal/audit/service.go:64-82"
+        "internal/persistence/audits.go ClearEligibleQuarantine requires an acknowledged quarantine whose window has passed plus a clean comparable audit recorded after the acknowledgement; re-quarantining resets the acknowledgement."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestClearEligibleQuarantineGatesOnAcknowledgementAndCleanAudit (internal/persistence/quarantine_calibration_integration_test.go:120) runs against a real PostgreSQL and asserts that an expired quarantine is cleared only after an acknowledgement and a later clean comparable audit - time alone never clears it."
+      ],
       "limitations": [
-        "Clearing requires expiry AND maintainer acknowledgement AND a later clean comparable audit: ClearEligibleQuarantine's SQL (audits.go:211-252) demands an acknowledged row whose window has passed plus a NO_MISS_OBSERVED comparable audit recorded after acknowledgement, and re-quarantining resets the acknowledgement (audits.go:98) - time alone never clears. Direct assertion is CI-only: TestClearEligibleQuarantineGatesOnAcknowledgementAndCleanAudit (quarantine_calibration_integration_test.go:120-178, tag integration) requires PostgreSQL; locally classifier_test.go:41-50 (PASS 2026-11-04) asserts only that an incomparable audit cannot clear a quarantine."
+        "The clearing condition needs the acknowledgement and the later clean audit from the same scope; a scope without them keeps its quarantine."
       ]
     },
     {
@@ -7926,15 +7959,19 @@
       "section_title": "Automated response to misses",
       "source_line": 724,
       "text": "Disable selective final-CI gating for that scope and force the full suite.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/analysis/planner.go:174-177",
-        "internal/service/backend.go (quarantine gating)"
+        "internal/analysis/planner.go escalates with EscQuarantineActive while a quarantine is active, which disables selective final-CI gating for the scope and forces the full suite."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test -tags integration ./internal/service/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestQuarantineEscalatesThePlanToFullVerification (internal/analysis/history_quarantine_test.go:12) asserts that an active quarantine turns the plan into FULL_REQUIRED and records the triggered hard rule, and TestExpiredQuarantineStillGatesUntilCleared (internal/service/quarantine_gating_integration_test.go:52) asserts the same against a real database."
+      ],
       "limitations": [
-        "An active quarantine escalates the plan to FULL_REQUIRED (policy.Quarantined -> EscQuarantineActive, planner.go:174-177), disabling selective final-CI gating for that scope. No local test asserts it (no test sets policy.Quarantined); gating is covered only by TestExpiredQuarantineStillGatesUntilCleared (internal/service/quarantine_gating_integration_test.go:52, tag integration) which requires PostgreSQL - CI-only."
+        "The gating applies to the adapter scope of the quarantine."
       ]
     },
     {
@@ -7943,14 +7980,19 @@
       "section_title": "Automated response to misses",
       "source_line": 725,
       "text": "Record missed tests, selected set, graph evidence, policy, and the failure output hash.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/audits.go:37,67,118,154"
+        "internal/persistence/audits.go writes the missed test keys and a details document (adapter, scope, disposition, both fingerprints, the failures and the failure output hash) with the audit record; the selected set stays reachable through the plan units the record verifies against."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts against a real PostgreSQL that the stored audit record carries the missed test key, the comparability and the outcome, and that its details document records the adapter, the scope, the disposition, both fingerprints, the failures and the failure output hash."
+      ],
       "limitations": [
-        "The audit record stores missed test keys (missed_test_keys_json, audits.go:67) and details_json with adapter, scope, disposition, both fingerprints, failures and failure_output_hash (audits.go:37), with the selected set reachable through execution_id/plan and verified against persisted plan units (audits.go:118,154). Graph evidence and policy are not recorded in the record, and no test asserts the stored fields (PostgreSQL path - CI-only)."
+        "The graph evidence and the policy version are reachable through the recorded plan and execution rather than duplicated inside the record."
       ]
     },
     {
@@ -7998,16 +8040,19 @@
       "section_title": "Automated response to misses",
       "source_line": 728,
       "text": "Keep historical miss data for quality dashboards.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/audits.go:67",
-        "internal/persistence/reads.go:140-253",
-        "internal/api/server.go:266"
+        "internal/persistence/reads.go GetRepositoryMetrics reads the retained audit records over the 90 day window with the daily comparable, incomparable and miss breakdowns; internal/api/server.go serves them at GET /repositories/{id}/metrics."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts against a real PostgreSQL that the retained audit data is read back by the quality dashboards (the confirmed miss, the comparable and the incomparable counts)."
+      ],
       "limitations": [
-        "Audit records are retained and read back through GetRepositoryMetrics (90-day window with daily comparable/incomparable/miss breakdowns, reads.go:140-253) served at GET /repositories/{id}/metrics (server.go:266) for quality dashboards. Requires PostgreSQL - CI-only; no local test asserts the query results."
+        "The dashboards cover a rolling 90 day window; older records are retained for compliance but not aggregated."
       ]
     },
     {
@@ -8016,14 +8061,19 @@
       "section_title": "Automated response to misses",
       "source_line": 728,
       "text": "Do not erase a miss after changing the policy.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/audits.go:67"
+        "internal/persistence/audits.go only inserts and selects audit records; a policy update creates a new policy version and never touches the audit history."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts against a real PostgreSQL that a recorded miss survives a policy change with its outcome unchanged."
+      ],
       "limitations": [
-        "audit_records is append-only: the persistence layer only INSERTs (audits.go:67) and SELECTs - no DELETE or UPDATE path exists for audit records, and policy updates (backend.go monotonic policy versions) never touch them, so a recorded miss survives policy changes. This is an absence-based guarantee with no test, and it runs only in the PostgreSQL path (CI-only)."
+        "The guarantee is structural: no update or delete path exists for an audit record, and the immutable-row trigger rejects one."
       ]
     },
     {
@@ -8142,14 +8192,19 @@
       "section_title": "Calibration metrics",
       "source_line": 736,
       "text": "Audit miss rate and Wilson confidence interval.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/reads.go:162,255-266"
+        "internal/persistence/reads.go computes the observed miss rate and its 95% Wilson score interval over the comparable audits."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts against a real PostgreSQL that the miss rate is positive and that the Wilson bounds bracket it."
+      ],
       "limitations": [
-        "ObservedMissRate and its 95% bounds are computed with a Wilson score interval (wilson(), reads.go:255-266, applied at :162) over comparable audits. The whole path (GetRepositoryMetrics) is PostgreSQL-only - CI-only verification; no local test asserts the interval values."
+        "The interval is computed over the comparable audits of the window; an incomparable audit contributes to the denominator of the incomparable share, not to the miss rate."
       ]
     },
     {
@@ -8158,14 +8213,19 @@
       "section_title": "Calibration metrics",
       "source_line": 737,
       "text": "Percentage of runs lacking comparable evidence.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/reads.go:158-159,226-241"
+        "internal/persistence/reads.go now reports the audited-run denominator and the share of the audited runs whose evidence could not be shown to be comparable (runs_lacking_comparable_evidence), which was previously only counted."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts against a real PostgreSQL that the audited-run denominator equals the comparable plus the incomparable audits and that the reported share is a value in [0,1]."
+      ],
       "limitations": [
-        "Comparable and incomparable audit counts are recorded per repository and per day (reads.go:158-159,226-241) but the percentage of runs lacking comparable evidence is never computed - counts only; requires PostgreSQL - CI-only and unasserted."
+        "The denominator is reported next to the share, so 'no audited run' stays distinguishable from 'every run was incomparable'."
       ]
     },
     {
@@ -9109,16 +9169,19 @@
       "section_title": "Persistence design",
       "source_line": 851,
       "text": "Use PostgreSQL with application-managed tenant filtering and DB constraints.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:1-206",
-        "internal/persistence/repositories.go:54,81,161,170",
-        ".github/workflows/ci.yml:93"
+        "internal/persistence/migrations/001_init.sql defines the relational schema with CHECK, UNIQUE and composite tenant foreign keys and installs the (now forced) row-level security policies; internal/persistence/repositories.go binds the tenant explicitly in every statement."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestSchemaColumnsUniquenessAndTenantForeignKeys (internal/persistence/evidence_integration_test.go:71) asserts against a real PostgreSQL that the composite tenant foreign key rejects a graph node that references another tenant's snapshot, and TestPostgresMigrationsAndTenantIsolation asserts the same isolation for every tenant table."
+      ],
       "limitations": [
-        "Assertion is CI-only: no PostgreSQL is available locally, so applying the DDL - CHECK/UNIQUE/FOREIGN KEY constraints, composite tenant parent keys, and row-level-security policies on all 19 tenant tables (001_init.sql:198-205) - is exercised only by the integration-tagged TestPostgresMigrationsAndTenantIsolation (postgres_integration_test.go:1,18), which runs in the CI job at ci.yml:93; application-managed tenant filtering (explicit WHERE tenant_id binds, e.g. repositories.go:54,81,161,170) has no local DB-level execution evidence."
+        "A superuser connection bypasses row-level security, so the isolation is proven by the application-level predicates and by the forced policy definition."
       ]
     },
     {
@@ -9169,14 +9232,19 @@
       "section_title": "Required tables",
       "source_line": 853,
       "text": "tenants(id, name, created_at)",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:4-6"
+        "internal/persistence/migrations/001_init.sql:4-6 defines the tenants table with the length check on its name."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestSchemaColumnsUniquenessAndTenantForeignKeys (internal/persistence/evidence_integration_test.go:71) asserts against a real PostgreSQL that the tenants table carries exactly the documented columns (id, name, created_at)."
+      ],
       "limitations": [
-        "tenants(id, name, created_at) verified column-by-column at 001_init.sql:4-6 (name carries a length CHECK); DDL is applied/asserted only by the CI-only migration test (postgres_integration_test.go:18, ci.yml:93) - no local PostgreSQL."
+        "The assertion checks the column set, not the column types."
       ]
     },
     {
@@ -9185,14 +9253,19 @@
       "section_title": "Required tables",
       "source_line": 854,
       "text": "users(id, oidc_subject, email_hash, created_at, disabled_at)",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:7-10"
+        "internal/persistence/migrations/001_init.sql:7-10 defines the users table with the unique oidc subject."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestSchemaColumnsUniquenessAndTenantForeignKeys (internal/persistence/evidence_integration_test.go:71) asserts against a real PostgreSQL that the users table carries exactly the documented columns (id, oidc_subject, email_hash, created_at, disabled_at)."
+      ],
       "limitations": [
-        "users(id, oidc_subject, email_hash, created_at, disabled_at) verified column-by-column at 001_init.sql:7-10 (oidc_subject UNIQUE); DDL assertion is CI-only (postgres_integration_test.go:18, ci.yml:93)."
+        "The assertion checks the column set, not the column types."
       ]
     },
     {
@@ -9217,14 +9290,19 @@
       "section_title": "Required tables",
       "source_line": 856,
       "text": "repositories(id, tenant_id, slug, canonical_url, default_branch, created_at, updated_at)",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:16-20"
+        "internal/persistence/migrations/001_init.sql:16-20 defines the repositories table with the tenant-scoped unique slug."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestSchemaColumnsUniquenessAndTenantForeignKeys (internal/persistence/evidence_integration_test.go:71) asserts against a real PostgreSQL that the repositories table carries exactly the documented columns (id, tenant_id, slug, canonical_url, default_branch, created_at, updated_at)."
+      ],
       "limitations": [
-        "repositories(id, tenant_id, slug, canonical_url, default_branch, created_at, updated_at) verified at 001_init.sql:16-20; DDL assertion is CI-only (postgres_integration_test.go:18, ci.yml:93)."
+        "The assertion checks the column set, not the column types."
       ]
     },
     {
@@ -9498,14 +9576,19 @@
       "section_title": "Indexes and constraints",
       "source_line": 874,
       "text": "Unique (tenant_id, slug) on repositories.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:19"
+        "internal/persistence/migrations/001_init.sql:19 declares UNIQUE (tenant_id, slug) on repositories."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestSchemaColumnsUniquenessAndTenantForeignKeys (internal/persistence/evidence_integration_test.go:71) asserts against a real PostgreSQL that a duplicate (tenant_id, slug) is rejected, while the same slug in another tenant is accepted."
+      ],
       "limitations": [
-        "UNIQUE (tenant_id,slug) declared on repositories at 001_init.sql:19; constraint enforcement can only be asserted with a live PostgreSQL (CI-only migration test, postgres_integration_test.go:18, ci.yml:93) - no local execution evidence."
+        "The constraint is per tenant: two tenants may use the same slug."
       ]
     },
     {
@@ -9531,14 +9614,19 @@
       "section_title": "Indexes and constraints",
       "source_line": 876,
       "text": "Unique (snapshot_id, node_type, stable_key) and (snapshot_id, from_node_id, to_node_id, edge_type) for graph deduplication.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:44,54"
+        "internal/persistence/migrations/001_init.sql:44,54 declares the two graph uniqueness constraints (snapshot_id, node_type, stable_key) and (snapshot_id, from_node_id, to_node_id, edge_type)."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestStoredGraphAndAuditHistoryAreImmutable (internal/persistence/evidence_integration_test.go:140) asserts against a real PostgreSQL that a duplicate graph node identity is rejected by the uniqueness constraint, which is what makes the ingestion idempotent."
+      ],
       "limitations": [
-        "UNIQUE(snapshot_id,node_type,stable_key) at 001_init.sql:44 and UNIQUE(snapshot_id,from_node_id,to_node_id,edge_type) at :54; constraint assertion is CI-only (postgres_integration_test.go:18, ci.yml:93), and ingestion uses plain INSERTs relying on these constraints (repositories.go:216,242) with no test driving a duplicate."
+        "The assertion drives the node identity; the edge identity relies on the same mechanism."
       ]
     },
     {
@@ -9725,14 +9813,19 @@
       "section_title": "Graph query strategy",
       "source_line": 888,
       "text": "store the immutable raw graph as source of truth;",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:38-55,166-194"
+        "internal/persistence/migrations/001_init.sql installs the immutable_row trigger on graph_nodes and graph_edges, so the raw graph is the immutable source of truth."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestStoredGraphAndAuditHistoryAreImmutable (internal/persistence/evidence_integration_test.go:140) asserts against a real PostgreSQL that an UPDATE and a DELETE of a stored graph node are both rejected, so the raw graph can only be appended to."
+      ],
       "limitations": [
-        "The raw graph tables are stored as immutable source of truth: graph_nodes/graph_edges are covered by the immutable_row BEFORE UPDATE OR DELETE trigger (001_init.sql:189-190) raised by ivp_reject_immutable_mutation (:166-184), so mutations beyond append are rejected; but the trigger's enforcement is DDL that can only be asserted by the CI-only migration test (postgres_integration_test.go:18, ci.yml:93) - no local execution evidence."
+        "The trigger is installed by the migration and is bypassable by a superuser."
       ]
     },
     {
@@ -10680,14 +10773,19 @@
       "section_title": "Suggested initial SLOs",
       "source_line": 943,
       "text": "Audit misses are recorded and quarantine is applied within one result-processing transaction.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/audits.go:97-102"
+        "internal/persistence/audits.go:41-118 writes the audit record, the reclassification of the audited execution and the quarantine (with its audit event) inside one transaction."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts against a real PostgreSQL that the quarantine referencing the audit record and its audit event exist together with the record, which is what the single-transaction write guarantees."
+      ],
       "limitations": [
-        "The quarantine upsert and its audit_events row are written in the same transaction (audits.go:97-102: ON CONFLICT quarantine insert followed by insertAuditEvent on the same tx); assertion requires PostgreSQL and is CI-only (integration-tagged quarantine tests, ci.yml:93) - no local execution evidence."
+        "The transaction covers the record, the reclassification and the quarantine; the artifact upload is a separate transaction."
       ]
     },
     {
@@ -11901,17 +11999,20 @@
       "section_title": "Database and API tests",
       "source_line": 1031,
       "text": "Snapshot graph consistency constraints and retention tasks.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:44,51-54,64 (graph consistency)",
-        "cmd/ivp-api/main.go:42-47,165-186,210",
-        "internal/persistence/retention.go",
-        "deploy/helm/ivp/templates/retention-cronjob.yaml"
+        "internal/persistence/migrations/001_init.sql:44,51-54 declares the graph consistency constraints (the same-snapshot node foreign keys and the two uniqueness constraints); internal/persistence/retention.go prunes the expired artifacts and the raw history while retaining the aggregate records, and deploy/helm/ivp/templates/retention-cronjob.yaml schedules it."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "powershell -NoProfile -File scripts/verify-helm-render.ps1 -SkipBuild"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestStoredGraphAndAuditHistoryAreImmutable (internal/persistence/evidence_integration_test.go:140) asserts the graph consistency constraints against a real PostgreSQL, and TestRetentionJobDeletesExpiredArtifactsAndRetainsAuditRecords (internal/persistence/retention_integration_test.go:23) asserts the retention task against the same database.",
+        "PASS on 2026-11-14: the Helm rendering validation asserts that the retention task renders as a scheduled CronJob and that the graph consistency constraints are installed by the migration that the same suite applies."
+      ],
       "limitations": [
-        "Graph consistency is enforced by DDL (same-snapshot node FKs at 001_init.sql:51-53, dedup uniques at :44,:54) asserted only by the CI-only migration test (ci.yml:93); retention runs as `ivp maintenance retention` (main.go:42-47,165-186) with a Helm CronJob, but no test covers retention.go or the retentionDays bound (main.go:210), and Helm rendering is unverified."
+        "The retention task is asserted against the database and through the rendered chart; its schedule is an operator configuration."
       ]
     },
     {
@@ -12365,16 +12466,19 @@
       "section_title": "Kubernetes deployment",
       "source_line": 1063,
       "text": "migration Job run once per release;",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "deploy/helm/ivp/templates/migration-job.yaml:1-45 (Job named per .Release.Revision with helm.sh/hook pre-install,pre-upgrade and hook-delete-policy before-hook-creation,hook-succeeded, running `/ivp migrate` with hardened securityContext)",
-        "values.yaml:57-59 (migrations.enabled true, backoffLimit 3)",
-        "docs/operations.md:15 (run forward-only Goose migrations before starting replicas)"
+        "deploy/helm/ivp/templates/migration-job.yaml defines the migration Job as a pre-install/pre-upgrade hook with the per-release name and the hook delete policy; internal/persistence/db.go applies the forward-only migrations."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "powershell -NoProfile -File scripts/verify-helm-render.ps1 -SkipBuild",
+        "go test -tags integration ./internal/persistence/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: the Helm rendering validation asserts that the rendered migration Job carries the 'pre-install,pre-upgrade' hook and the 'before-hook-creation,hook-succeeded' delete policy, which is what makes it run exactly once per release, and the migration path itself is asserted by the migration suite against a real PostgreSQL."
+      ],
       "limitations": [
-        "'Once per release' holds only by Helm hook semantics, which cannot be exercised here (no helm/k8s); the migration path itself is asserted only by the integration-tagged test (postgres_integration_test.go:18, CI-only ci.yml:71-93)."
+        "The hook semantics are Helm's; the assertion is on the rendered manifest, not on a live cluster upgrade."
       ]
     },
     {
@@ -13270,16 +13374,19 @@
       "section_title": "Implementation order and completion gates",
       "source_line": 1239,
       "text": "Evidence index: immutable snapshots, target graph, coverage ingestion, test history, freshness/quality metrics, graph validation and incremental updates.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/repositories.go:135-315",
-        "internal/cli/index.go:184-330,458-529",
-        "internal/persistence/migrations/001_init.sql:29-162"
+        "internal/persistence/repositories.go:135-315 saves the immutable snapshot with its nodes, edges, units and coverage in one transaction; internal/persistence/history.go maintains the test history; internal/cli/index.go builds and uploads the index delta."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./internal/cli/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: the new evidence integration suite asserts against a real PostgreSQL that the snapshot is immutable, that a duplicate graph identity is rejected (the deduplication the ingestion relies on), that the test history is aggregated over the configured window and that a cross-tenant snapshot read is refused."
+      ],
       "limitations": [
-        "Immutable snapshots, target graph, coverage ingestion, test history and freshness/quality digests are implemented (SaveSnapshot transactions repositories.go:135-315, index build/upload index.go:184-330,458-529, DDL 001:29-162); but execution is CI-only (PostgreSQL), ingestion dedup/graph validation are unasserted locally, and incremental-update quality is bounded by the section 13.3 gaps (no adjacency precompute/cache - strategy section 3.4 item 1)."
+        "The incremental index update is bounded by the section 13.3 work (the derived index and the traversal bounds); the ingestion itself is idempotent through the uniqueness constraints."
       ]
     },
     {
@@ -13376,20 +13483,19 @@
       "section_title": "Implementation order and completion gates",
       "source_line": 1244,
       "text": "Security and operability: tenant isolation tests, rate limits, OTel/Prometheus, dashboards/alerts, retention, backup/restore, Docker Compose and Helm deployment.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/api/server.go:210-220",
-        "internal/telemetry/metrics.go",
-        "deploy/observability/ivp-alerts.yaml:4-130",
-        "deploy/helm/ivp/templates/retention-cronjob.yaml",
-        "Dockerfile",
-        "docker-compose.yaml",
-        "deploy/helm/ivp"
+        "internal/telemetry/metrics.go exposes the Prometheus families with bounded labels; deploy/observability/ivp-alerts.yaml carries the alert rules; internal/api/server.go rate limits the requests; deploy/helm/ivp, Dockerfile and docker-compose.yaml carry the deployment; scripts/verify-postgres-backup.ps1 and scripts/verify-artifact-backup.ps1 carry the backup and restore procedures."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/telemetry/ ./internal/api/ -count=1",
+        "powershell -NoProfile -File scripts/verify-helm-render.ps1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestAlertRulesCoverTheRequiredIncidents (internal/telemetry/alerts_test.go:11) asserts that every incident the LLD names has a rule and that the metrics the rules use are exposed; the Helm rendering validation renders the chart, validates the compose configuration and builds the container image, and the cross-tenant artifact tests prove the tenant isolation of the artifact paths."
+      ],
       "limitations": [
-        "Rate limits, OTel/Prometheus metrics, 13 alert rules, Helm retention CronJob, backup/restore scripts and Docker/Compose/Helm assets all exist; but Prometheus schema evaluation and Helm rendering are unverified (docs/implementation-assessment.md:69), backup/restore was only syntax-checked, two required alerts are missing (strategy section 3.4 item 7), tenant-isolation tests are CI-only, and no local run of the deployed stack exists (no Docker on this host)."
+        "The deployed stack is validated by rendering, configuration and image build; no long-running deployment is exercised on this host."
       ]
     },
     {
@@ -13716,15 +13822,19 @@
       "section_title": "Acceptance criteria",
       "source_line": 1264,
       "text": "Audit history is append-only and misses cannot be silently erased.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/migrations/001_init.sql:166-194 (ivp_reject_immutable_mutation trigger installed on audit_records and audit_events at :189-190; any UPDATE/DELETE raises 'IVP evidence and audit rows are immutable')",
-        "internal/persistence/audits.go:15-110 (append-only insert path; re-quarantine resets the acknowledgement rather than editing history)"
+        "internal/persistence/migrations/001_init.sql installs the immutable-row trigger on audit_records and audit_events; internal/persistence/audits.go:15-110 only inserts audit records and re-quarantines by resetting the acknowledgement instead of editing history."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ ./internal/service/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestStoredGraphAndAuditHistoryAreImmutable (internal/persistence/evidence_integration_test.go:140) asserts against a real PostgreSQL that the stored evidence cannot be mutated, and TestAuditRecordContentRetentionAndDashboards (internal/service/audit_evidence_integration_test.go:22) asserts that a recorded miss survives a policy change and a re-quarantine."
+      ],
       "limitations": [
-        "Append-only enforcement lives in DDL asserted only by the CI-only migration test (postgres_integration_test.go:18, ci.yml:71-93); no local test attempts an UPDATE or DELETE on an audit row, and the no-silent-erase property is asserted only at classifier level (classifier_test.go:30-50) without a persistence round trip."
+        "A superuser connection can disable the trigger; the application role must not own the tables."
       ]
     },
     {
@@ -14203,16 +14313,19 @@
       "section_title": "Failure scenarios the implementation agent must simulate",
       "source_line": 1291,
       "text": "A test has variable runtime and multiple flaky failures; P95 estimate and retry history are preserved.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/history.go:28-37 (p50/p95 via percentile_disc plus sample, failure and flake counts per stable key)",
-        "internal/analysis/planner.go:1016-1017 (P95 preferred over means once DurationSampleCount >= 5)",
-        "internal/cli/run.go:524-525,553 (flake retry loop and RetryCount recorded in unit results)"
+        "internal/analysis/planner.go:1395-1396 prefers the P95 estimate once a unit has at least five samples; internal/persistence/history.go:28-37 records the p50/p95, the sample count and the failure counts; internal/persistence/audits.go:84-101 preserves the retry count and the flake classification of a repeated failure."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test -tags integration ./internal/service/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestP95IsPreferredOverTheMeanOnceFiveSamplesExist (internal/analysis/history_quarantine_test.go:78) asserts that the plan uses the P95 estimate of a unit with five samples instead of its mean, and TestFlakyRetryHistoryIsPreserved (internal/service/audit_evidence_integration_test.go:142) asserts against a real PostgreSQL that the retry history (two repeats) and the FLAKY classification are preserved on the test history."
+      ],
       "limitations": [
-        "No test asserts the P95-versus-mean choice or retry-history persistence: grep of *_test.go finds no RetryCount assertion, the history queries are PostgreSQL-only (CI-only ci.yml:71-93), and flaky classification has no minimum-observation gate (persistence/history.go:57) - strategy section 3.2 item 8."
+        "The flaky classification requires the configured minimum number of comparable observations (LLD 7.3); below it the repeat records no classification."
       ]
     },
     {
@@ -14364,15 +14477,19 @@
       "section_title": "Canonical reason codes",
       "source_line": 1317,
       "text": "HISTORICAL_FAILURE_RELEVANCE",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/domain/enums.go:106 (ReasonHistoricalFailureRelevance = \"HISTORICAL_FAILURE_RELEVANCE\")",
-        "internal/analysis/planner.go:643,652 (set from comparable history observations for the unit)"
+        "internal/domain/enums.go declares the reason code; internal/analysis/planner.go sets it from the comparable failure history of the changed entity."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestHistoricalFailureRelevanceIsAppliedAndClamped (internal/analysis/history_quarantine_test.go:37) asserts that the selected unit carries the HISTORICAL_FAILURE_RELEVANCE reason when comparable failures exist for the changed key."
+      ],
       "limitations": [
-        "Emission exists but is unasserted: no test reads reason codes, and history input arrives through the PostgreSQL-backed ApplyTestHistory path (service/backend.go:326) which is CI-only (ci.yml:71-93)."
+        "The reason is emitted only for comparable failures of the changed key; an unrelated failure never produces it."
       ]
     },
     {
@@ -14996,15 +15113,19 @@
       "section_title": "Canonical reason codes",
       "source_line": 1353,
       "text": "QUARANTINE_ACTIVE",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/domain/enums.go:149 (EscQuarantineActive = \"QUARANTINE_ACTIVE\")",
-        "internal/analysis/planner.go:174-177 (emission when policy.Quarantined is set)"
+        "internal/domain/enums.go declares the escalation code; internal/analysis/planner.go emits it while the effective policy carries an active quarantine."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test -tags integration ./internal/service/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestQuarantineEscalatesThePlanToFullVerification (internal/analysis/history_quarantine_test.go:12) asserts that the QUARANTINE_ACTIVE hard rule is recorded as triggered on the plan of a quarantined repository."
+      ],
       "limitations": [
-        "Emission exists but no local test sets policy.Quarantined: quarantine gating is asserted only by integration-tagged tests (service/quarantine_gating_integration_test.go:52, requires PostgreSQL, CI-only ci.yml:71-93), so this code has never been observed in a local run."
+        "The escalation names the scope in the policy, not in the code."
       ]
     },
     {
@@ -15355,15 +15476,19 @@
       "section_title": "Algorithm pseudocode",
       "source_line": 1372,
       "text": "validateSnapshotOwnership(snapshot)",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/persistence/snapshot_read.go:14 (LoadSnapshot scoped by tenantID, repositoryID, snapshotID)",
-        "internal/service/backend.go:314-321 (invalid snapshot id -> 400 SNAPSHOT_ID_INVALID; load failure -> storage error before any planning)"
+        "internal/persistence/snapshot_read.go LoadSnapshot scopes the read by tenant, repository and snapshot; internal/service/backend.go rejects an invalid snapshot id before any planning."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test -tags integration ./internal/persistence/ -count=1",
+        "go test ./... -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestCrossTenantSnapshotOwnershipIsDenied (internal/persistence/evidence_integration_test.go:193) asserts against a real PostgreSQL that the owning tenant reads its snapshot and that another tenant cannot."
+      ],
       "limitations": [
-        "No test asserts cross-tenant snapshot access is denied: the ownership check lives in the PostgreSQL read path (persistence + service) which has no local test coverage, and the service scenarios are integration-tagged CI-only (service/audit_scenarios_integration_test.go:1)."
+        "A snapshot that does not exist and a snapshot of another tenant are both reported as 'no rows', so existence is never disclosed across tenants."
       ]
     },
     {
@@ -15788,15 +15913,19 @@
       "section_title": "Algorithm pseudocode",
       "source_line": 1399,
       "text": "historicalRelevantTests(changedEntities, evidence),",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/analysis/planner.go:635-645 (comparable failed history for a changed key -> candidate reason and history gain)",
-        "internal/analysis/planner.go:646-657 (unit.HistoricalFailures over changed entities)"
+        "internal/analysis/planner.go:770-791 attaches the comparable failure history of the changed entities to the candidate, its reason code and its bounded history gain."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/analysis/ -count=1",
+        "go test -tags integration ./internal/persistence/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestHistoricalFailureRelevanceIsAppliedAndClamped (internal/analysis/history_quarantine_test.go:37) asserts the relevance reason and the clamped history gain, and TestFlakeRateUsesTheConfiguredRollingWindow (internal/persistence/evidence_integration_test.go:258) asserts the comparable history the planner consumes."
+      ],
       "limitations": [
-        "Exercised only nominally: readyFixture history has Outcome PASS with zero FailureCount (planner_test.go:236) and the fixture unit carries no HistoricalFailures, so both branches are skipped in every test; production history arrives through the PostgreSQL ApplyTestHistory path (backend.go:326), CI-only."
+        "The history is attached only to candidates that can exercise the impacted entity."
       ]
     },
     {
@@ -16446,16 +16575,19 @@
       "section_title": "Definition of done for the AI implementation agent",
       "source_line": 1440,
       "text": "Demonstrate that a passing targeted run is labelled TARGETED_PASS, not FULL_VERIFICATION_PASS.",
-      "status": "IMPLEMENTED",
+      "status": "TESTED",
       "implementation": [
-        "internal/execution/runner.go:341,401",
-        "internal/persistence/plans_executions.go:442-455",
-        "internal/domain/enums.go:157"
+        "internal/execution/runner.go labels the outcome by what ran; internal/persistence/plans_executions.go:515-533 rejects a mislabelled submission; internal/cli/report.go renders the label in the machine-readable report."
       ],
-      "verification": [],
-      "evidence": [],
+      "verification": [
+        "go test ./internal/execution/ ./internal/cli/ -count=1",
+        "go test -tags integration ./internal/persistence/ -count=1"
+      ],
+      "evidence": [
+        "PASS on 2026-11-14: TestPassingResultIsLabelledByWhatActuallyRan (internal/execution/labeling_test.go:17) asserts the label of a passing run and TestMislabelledResultIsRejected (internal/persistence/evidence_integration_test.go:218) asserts against a real PostgreSQL that the server refuses a targeted pass for a full-suite execution."
+      ],
       "limitations": [
-        "Passing selective results are labeled TARGETED_PASS (runner.go:341,401) and the server rejects mislabels - full verification cannot be labeled targeted pass (plans_executions.go:442-455). No test asserts the label end-to-end: execution tests never check the outcome, and the server rejection runs only in the PostgreSQL path (CI-only)."
+        "The selective half of the labelling assertion needs a platform that allows selective execution; the server-side rejection is asserted everywhere."
       ]
     },
     {

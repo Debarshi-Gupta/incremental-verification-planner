@@ -63,16 +63,21 @@ type RepositoryMetrics struct {
 	CalibrationBreakdown               []CalibrationBreakdown `json:"calibration_breakdown"`
 	ComparableAudits                   int64                  `json:"comparable_audits"`
 	IncomparableAudits                 int64                  `json:"incomparable_audits"`
-	ConfirmedMisses                    int64                  `json:"confirmed_misses"`
-	PossibleMisses                     int64                  `json:"possible_misses"`
-	ObservedMissRate                   float64                `json:"observed_miss_rate"`
-	MissRateCI95Lower                  float64                `json:"miss_rate_ci95_lower"`
-	MissRateCI95Upper                  float64                `json:"miss_rate_ci95_upper"`
-	TargetedPasses                     int64                  `json:"targeted_passes"`
-	FullVerificationPasses             int64                  `json:"full_verification_passes"`
-	ExecutionCount                     int64                  `json:"execution_count"`
-	MeanEstimatedActualRatio           float64                `json:"mean_estimated_actual_ratio"`
-	Daily                              []DailyMetrics         `json:"daily"`
+	// AuditedRuns is the denominator of RunsLackingComparableEvidence, which
+	// reports the share of the audited runs whose evidence could not be shown
+	// to be comparable (LLD 10.6).
+	AuditedRuns                   int64          `json:"audited_runs"`
+	RunsLackingComparableEvidence float64        `json:"runs_lacking_comparable_evidence"`
+	ConfirmedMisses               int64          `json:"confirmed_misses"`
+	PossibleMisses                int64          `json:"possible_misses"`
+	ObservedMissRate              float64        `json:"observed_miss_rate"`
+	MissRateCI95Lower             float64        `json:"miss_rate_ci95_lower"`
+	MissRateCI95Upper             float64        `json:"miss_rate_ci95_upper"`
+	TargetedPasses                int64          `json:"targeted_passes"`
+	FullVerificationPasses        int64          `json:"full_verification_passes"`
+	ExecutionCount                int64          `json:"execution_count"`
+	MeanEstimatedActualRatio      float64        `json:"mean_estimated_actual_ratio"`
+	Daily                         []DailyMetrics `json:"daily"`
 	// CalibrationMetrics is the LLD 10.6 metric set computed from the
 	// persisted evidence of this repository. Every metric states its own
 	// denominator and whether it is defined.
@@ -185,7 +190,7 @@ func (d *DB) GetRepositoryMetrics(ctx context.Context, tenantID, repositoryID uu
 	report := RepositoryMetrics{RepositoryID: repositoryID, WindowStart: start, Daily: make([]DailyMetrics, 0), CalibrationBreakdown: make([]CalibrationBreakdown, 0)}
 	err := d.TenantTx(ctx, tenantID.String(), func(tx pgx.Tx) error {
 		var auditTotals, incomparable, confirmed, possible int64
-		err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE comparability='COMPARABLE'),count(*) FILTER(WHERE comparability='INCOMPARABLE'),count(*) FILTER(WHERE outcome=$3),count(*) FILTER(WHERE outcome=$4)
+		err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE ar.comparability='COMPARABLE'),count(*) FILTER(WHERE ar.comparability='INCOMPARABLE'),count(*) FILTER(WHERE ar.outcome=$3),count(*) FILTER(WHERE ar.outcome=$4)
 			FROM audit_records ar JOIN executions e ON e.id=ar.execution_id AND e.tenant_id=ar.tenant_id JOIN verification_plans p ON p.id=e.plan_id AND p.tenant_id=e.tenant_id
 			WHERE ar.tenant_id=$1 AND p.repository_id=$2 AND ar.created_at >= $5`, tenantID, repositoryID, domain.AuditConfirmedMiss, domain.AuditPossibleMiss, start).Scan(&auditTotals, &incomparable, &confirmed, &possible)
 		if err != nil {
@@ -196,6 +201,14 @@ func (d *DB) GetRepositoryMetrics(ctx context.Context, tenantID, repositoryID uu
 		report.ConfirmedMisses = confirmed
 		report.PossibleMisses = possible
 		report.ObservedMissRate, report.MissRateCI95Lower, report.MissRateCI95Upper = wilson(confirmed+possible, auditTotals)
+		// LLD 10.6: the share of the audited runs whose evidence could not be
+		// shown to be comparable. The denominator is reported next to the
+		// share, so "no audited run" stays distinguishable from "every run was
+		// incomparable".
+		report.AuditedRuns = auditTotals + incomparable
+		if report.AuditedRuns > 0 {
+			report.RunsLackingComparableEvidence = float64(incomparable) / float64(report.AuditedRuns)
+		}
 		var targeted, full, executions int64
 		var ratio float64
 		if err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE e.outcome=$3),count(*) FILTER(WHERE e.outcome=$4),count(*),COALESCE(avg(p.estimated_duration_ms::double precision/NULLIF(e.elapsed_ms,0)),0)

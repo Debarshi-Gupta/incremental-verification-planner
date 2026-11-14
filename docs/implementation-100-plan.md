@@ -9,14 +9,16 @@ for this plan and stays tracked as Wave 3 work in
 
 **Result (2026-11-14):** the definition of done below is met.
 `docs/requirements-inventory.json` shows **853 rows reviewed, 0 `UNREVIEWED`,
-0 `IN_PROGRESS`, 0 `NOT_STARTED`** — 476 `TESTED` and 377 `IMPLEMENTED`, so the
+0 `IN_PROGRESS`, 0 `NOT_STARTED`** — 510 `TESTED` and 343 `IMPLEMENTED`, so the
 implementation-coverage lower bound is **100.0%** and the verified-completion
-lower bound is **55.8%**. The tracker
+lower bound is **59.8%**. The tracker
 (`docs/implementation-tracker.md`, generated) and the dated entries in
 `docs/implementation-log.md` carry the per-package evidence. The rows that
-remain `IMPLEMENTED` rather than `TESTED` are the environment-gated ones
-(the PostgreSQL backup/restore drill, the availability SLO and the
-adapter-granularity disposition); their limitations are recorded per row.
+remain `IMPLEMENTED` rather than `TESTED` are the ones whose criterion needs an
+operator environment (a production month of availability measurements, S3
+recovery, a native-toolchain run); their limitations are recorded per row, and
+the program that lifts them is tracked in
+`docs/implementation-completion-strategy.md` §4.
 
 **Definition of done:** `docs/requirements-inventory.json` shows
 `IMPLEMENTED + TESTED = 853`, `IN_PROGRESS = 0`, `NOT_STARTED = 0`;

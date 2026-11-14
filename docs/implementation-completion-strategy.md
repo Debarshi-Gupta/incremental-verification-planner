@@ -351,9 +351,9 @@ with an evidence-backed Appendix-D definition-of-done.
 ### Closing state (2026-11-14)
 
 The plan is executed. The inventory holds **853 rows reviewed, 0 `UNREVIEWED`,
-0 `IN_PROGRESS`, 0 `NOT_STARTED`** — 476 `TESTED` and 377 `IMPLEMENTED`, an
+0 `IN_PROGRESS`, 0 `NOT_STARTED`** — 510 `TESTED` and 343 `IMPLEMENTED`, an
 implementation-coverage lower bound of 100.0% and a verified-completion lower
-bound of 55.8%. The adapter fixture/contract corpus, the §13.3 graph strategy
+bound of 59.8%. The adapter fixture/contract corpus, the §13.3 graph strategy
 (the derived index and the traversal bounds), the scheduled-audit orchestration,
 the §10.6 calibration metrics, the alert wiring, the §17 validation program
 (nightly native fixtures, performance and historical replay) and the tracing
@@ -361,8 +361,12 @@ exporter all exist and are asserted. Running the database-backed suites against
 a real PostgreSQL — possible because the Docker daemon was provisioned on the
 build host — exposed and closed three defects that the compile-only gate had
 hidden: the migrations had never applied, the snapshot identity had drifted
-from the code, and the row-level security policies were not forced. The
-remaining environment-gated rows (the backup/restore drill, the native-toolchain
-nightly job, the production availability measurement) are recorded as
-`IMPLEMENTED` with their limitations, and the deviations are published in
-`docs/slo-report.md`.
+from the code, and the row-level security policies were not forced.
+
+The verified-completion program continues (§4): the first wave closed the 34
+rows whose assertions already existed but had never been executed here, and the
+remaining `IMPLEMENTED` rows are the ones whose criterion needs an operator
+environment (a production month of availability measurements, S3 recovery, a
+native-toolchain run) or a direct assertion that is still to be written. The
+remaining environment-gated rows are recorded as `IMPLEMENTED` with their
+limitations, and the deviations are published in `docs/slo-report.md`.

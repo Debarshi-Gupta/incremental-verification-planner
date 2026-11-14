@@ -237,6 +237,30 @@ The unified regression pushed a canary secret and a canary source path through e
 | 2026-11-14 | `helm lint` / `helm template` / `docker compose config` | PASS | The chart renders 337 lines with a pinned digest, the lint reports no failure and the compose configuration resolves |
 | 2026-11-14 | Real gradle/bazel/nx/jest/pytest execution; native toolchain CI job; a production month of availability measurements | Environment-gated | The native fixtures run in the nightly job with the toolchains installed; the availability SLO is reported as an explicit deviation until a deployment provides a month of measurements |
 
+## 2026-11-14 — Wave 1 of the verified-completion program (batch 17, 34 rows)
+
+Started the program that lifts the *verified* completion beyond the 100% implementation coverage. The wave took the rows whose assertions already existed but had never been executed here (the "CI-only" ones) and closed them by running them against the real infrastructure this host now provides, plus the few that needed an assertion or an implementation of their own.
+
+- **The wave's shape:** 34 of the 377 `IMPLEMENTED` rows — the environment-gated ones (31 PostgreSQL-backed, 3 Docker/Helm/Compose). Every one of them now has an executed assertion.
+- **New direct assertions:** `internal/analysis/history_quarantine_test.go` (the quarantine escalation, the historical-failure relevance and its clamped 0-10 risk contribution, and the P95-over-mean preference), `internal/persistence/evidence_integration_test.go` (the schema columns, the uniqueness and tenant foreign keys, the immutable snapshot/graph/audit rows, the cross-tenant snapshot ownership, the rejected mislabelled result and the rolling-window flake rate), `internal/service/audit_evidence_integration_test.go` (the audit record content, the quarantine written with its audit event, the survival of a miss across a policy change, the dashboards reading the retained data back, and the preserved retry history), and `internal/execution/labeling_test.go` (the outcome label).
+- **One implementation was missing and is now in place:** the *percentage of runs lacking comparable evidence* was never computed — only counts. `internal/persistence/reads.go` now reports the audited-run denominator next to the share, so "no audited run" stays distinguishable from "every run was incomparable".
+- **Two more defects surfaced while writing the assertions:** the repository-metrics query had an ambiguous `outcome` column (the quality dashboard would have failed for every caller) and the schema's graph consistency was never driven by a duplicate row.
+
+- **Totals after batch 17: 853 rows, 853 reviewed, 0 `UNREVIEWED`** — 510 `TESTED` (59.8% verified completion), 343 `IMPLEMENTED` (100% implementation coverage), 0 `IN_PROGRESS`, 0 `NOT_STARTED`.
+
+| Date | Command/check | Result | Evidence or limitation |
+|---|---|---|---|
+| 2026-11-14 | Per-batch validator for batch 17 (`check17.py`: exact 34-ID set, field rules, evidence dated 2026-11-14) | PASS | 34/34 rows; no missing/extra IDs; all rows TESTED with implementation + verification + evidence + limitations |
+| 2026-11-14 | `merge_updates.py batch17.json` | PASS | 34 rows merged; total rows unchanged at 853 |
+| 2026-11-14 | Inventory totals | PASS | 853 reviewed / 0 `UNREVIEWED`; 510 `TESTED` (59.8%), 343 `IMPLEMENTED` (100% implementation coverage) |
+| 2026-11-14 | `python scripts/generate-tracker.py` then `--check` | PASS | `requirements: 853`; generated tracker current |
+| 2026-11-14 | `gofmt -l` over tracked + untracked `*.go` | PASS | All 193 Go files clean |
+| 2026-11-14 | `go vet ./...` and `go vet -tags integration ./...` | PASS | No findings; integration-tagged packages compile |
+| 2026-11-14 | `go test ./... -count=1` | PASS | All packages green |
+| 2026-11-14 | `go test -tags integration ./... -count=1` | PASS | The database-backed suites pass against a real PostgreSQL, including the four new evidence and audit suites |
+| 2026-11-14 | `powershell -NoProfile -File scripts/verify-helm-render.ps1` | PASS | The chart renders with the per-release migration hook and the scheduled retention CronJob, the compose configuration resolves, and the container image builds |
+| 2026-11-14 | `docker build -t ivp-render-validation:local -f Dockerfile .` | PASS | The repository image builds on this host (the deployment row no longer needs to claim that no local run of the stack is possible) |
+
 ## 2026-11-12 — WP-D: Adapter correctness (batches 15–16, 10 rows)
 
 Closed strategy §3.1 items 3–7 and 9 (LLD §1.4/§8.4/§8.7/§4.3): every integration family now asserts the behaviour its LLD row claims, and the per-family gaps are closed.

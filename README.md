@@ -5,15 +5,15 @@ IVP is a conservative verification planner with a Go control plane and a local C
 ## Status
 
 The LLD-complete implementation is finished: the requirement inventory holds
-**853 rows, all reviewed, with 0 not-started and 0 in-progress** — 476 `TESTED`
-and 377 `IMPLEMENTED`, an implementation-coverage lower bound of **100.0%** and
-a verified-completion lower bound of **55.8%**. The current scores are
+**853 rows, all reviewed, with 0 not-started and 0 in-progress** — 510 `TESTED`
+and 343 `IMPLEMENTED`, an implementation-coverage lower bound of **100.0%** and
+a verified-completion lower bound of **59.8%**. The current scores are
 generated into [`docs/implementation-tracker.md`](docs/implementation-tracker.md),
 and the per-package evidence is recorded in
 [`docs/implementation-log.md`](docs/implementation-log.md). The rows that are
-`IMPLEMENTED` rather than `TESTED` are the environment-gated ones (the
-PostgreSQL backup/restore drill, the production availability measurement); each
-carries its limitation.
+`IMPLEMENTED` rather than `TESTED` are the ones whose criterion needs an
+operator environment (a production month of availability measurements, S3
+recovery, a native-toolchain run); each carries its limitation.
 
 Selective final-CI gating stays disabled by default, and the deviations from
 the service levels are published in [`docs/slo-report.md`](docs/slo-report.md).

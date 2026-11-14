@@ -95,6 +95,24 @@ try {
     }
     Write-Output 'PASS: artifact storage volume renders with explicit access modes.'
 
+    # The migration Job must run once per release: it is a Helm pre-install /
+    # pre-upgrade hook, and the previous hook is deleted so a release never
+    # runs the migration twice (LLD 18.2).
+    if ($manifest -notmatch 'helm\.sh/hook:\s*pre-install,pre-upgrade') {
+        throw 'The migration Job is not a pre-install/pre-upgrade hook, so it would not run once per release.'
+    }
+    Write-Output 'PASS: the migration Job is a pre-install/pre-upgrade hook.'
+    if ($manifest -notmatch 'helm\.sh/hook-delete-policy:\s*before-hook-creation,hook-succeeded') {
+        throw 'The migration Job does not delete its previous hook, so it could run twice per release.'
+    }
+    Write-Output 'PASS: the migration Job deletes its previous hook before a new one is created.'
+
+    # The retention task must be scheduled, not only rendered (LLD 17.6).
+    if ($manifest -notmatch 'kind: CronJob' -or $manifest -notmatch 'schedule:') {
+        throw 'The retention CronJob does not carry a schedule.'
+    }
+    Write-Output 'PASS: the retention task renders as a scheduled CronJob.'
+
     if (-not $SkipCompose) {
         Write-Output '== docker compose config =='
         $composeArgs = @('compose', '--env-file', '.env.example', '--profile', 'monitoring', 'config')
